@@ -20,7 +20,7 @@ android {
             // Every ABI you list multiplies the size of the bundled CPython.
             // These two cover essentially all real Android hardware; add
             // x86_64 only if you run it on an emulator.
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+            abiFilters += listOf("arm64-v8a")
         }
     }
 
