@@ -106,6 +106,19 @@ jobs:
             changed=1
           fi
 
+          # Chaquopy has no Python 3.12 build for 32-bit ARM, and listing
+          # that ABI fails at configuration time:
+          #   "Python 3.12 is not available for the ABI 'armeabi-v7a'."
+          # Every Android phone since ~2017 is 64-bit, so dropping it costs
+          # nothing real.
+          APPGRADLE=../../../app/build.gradle.kts
+          if [ -f "$APPGRADLE" ] && grep -q 'armeabi-v7a' "$APPGRADLE"; then
+            sed -i 's/, *"armeabi-v7a"//; s/"armeabi-v7a" *, *//' "$APPGRADLE"
+            echo "dropped armeabi-v7a — unsupported by Chaquopy on Python 3.12"
+            grep -n 'abiFilters' "$APPGRADLE" || true
+            changed=1
+          fi
+
           [ "$changed" = "0" ] && echo "already correct — nothing to do"
           echo "--- icon reference now:"
           grep -n 'android:icon' AndroidManifest.xml || true
