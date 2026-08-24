@@ -97,46 +97,60 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
       # The pipeline lives in two places; this copies it into the APK bundle
       # and fails if a non-stdlib import has crept in, which would need a pip
       # block in Gradle and a wheel that exists for Android.
+      # The runner already has python3.12 and the pipeline needs nothing
+      # beyond the standard library, so there is no setup-python step.
       - name: Sync pipeline into the app bundle
         working-directory: ${{ steps.find.outputs.dir }}
         run: |
+          echo "::group::Sync pipeline into the app bundle"
           chmod +x sync_android.sh
           ./sync_android.sh
+          echo "::endgroup::"
 
       # Catches a broken pipeline here rather than after you have installed it.
       - name: Run the test suites
         working-directory: ${{ steps.find.outputs.dir }}
         run: |
+          echo "::group::Run the test suites"
           for f in test_corpus.py test_adversarial.py test_comps.py test_economics.py; do
             echo "--- $f"
             python3 "$f"
           done
+          echo "::endgroup::"
 
-      # `gradle-version` is load-bearing: without it this action only sets
-      # up caching for a wrapper that is expected to already exist, and
-      # leaves no `gradle` on the PATH. AGP 8.7 needs Gradle 8.9+.
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.9'
+      # Gradle is installed directly rather than through an action.
+      #
+      # Two attempts went wrong here already: setup-gradle without
+      # `gradle-version` provides no `gradle` binary at all (it only
+      # configures caching for an existing wrapper), and adding
+      # `gradle-version` introduced a different failure. Downloading the
+      # distribution is boring, deterministic, and does exactly one thing —
+      # worth more than convenience on a step that has now broken twice.
+      - name: Install Gradle 8.9
+        run: |
+          set -eux
+          curl -sSL --retry 3 --fail \
+            https://services.gradle.org/distributions/gradle-8.9-bin.zip \
+            -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /opt
+          /opt/gradle-8.9/bin/gradle --version
+          echo "/opt/gradle-8.9/bin" >> "$GITHUB_PATH"
 
-      # Print the toolchain before building. When a build fails on someone
-      # else's machine, the first question is always which versions were
-      # actually in play.
+      # Diagnostics only. `always()` so a build failure still shows what the
+      # toolchain actually was, and `continue-on-error` so this can never be
+      # the thing that fails the run.
       - name: Toolchain versions
+        if: always()
+        continue-on-error: true
         run: |
           echo "java:   $(java -version 2>&1 | head -1)"
-          echo "gradle: $(gradle --version | grep -i '^Gradle' | head -1)"
+          echo "gradle: $(gradle --version 2>/dev/null | grep -i '^Gradle' || echo 'NOT ON PATH')"
           echo "sdk:    ${ANDROID_HOME:-unset}"
-          echo "ndk:    $(ls "${ANDROID_HOME}/ndk" 2>/dev/null | tr '\n' ' ' || echo none)"
+          echo "ndk dir contents:"
+          ls "${ANDROID_HOME}/ndk" 2>/dev/null || echo "  (no ndk installed)"
 
       # Invoked directly rather than through a wrapper. Generating one first
       # was an extra failure point that bought nothing in CI, where the
