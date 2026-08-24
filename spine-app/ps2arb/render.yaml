@@ -1,0 +1,12 @@
+# Push this repo to GitHub, then on render.com: New > Blueprint > pick the repo.
+# Free tier. Gives you a permanent https://your-app.onrender.com address.
+services:
+  - type: web
+    name: spine
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    disk:
+      name: spine-data
+      mountPath: /data
+      sizeGB: 1

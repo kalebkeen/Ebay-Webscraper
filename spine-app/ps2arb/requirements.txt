@@ -1,0 +1,15 @@
+# The pipeline itself has NO third-party dependencies.
+# numpy and rapidfuzz were removed so the whole thing runs under Chaquopy
+# inside an APK, where every C extension is a build risk.
+#   numpy    -> stdlib statistics + a two-row LCS DP (comps.py)
+#   rapidfuzz-> fuzzy.py, verified to 0.0000 max difference (test_fuzzy_parity.py)
+#
+# Nothing below is needed to run decide.py, snapshot.py, or the test suites.
+
+# Optional: only for the desktop API server (api.py).
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.0
+
+# Optional: only to re-run the rapidfuzz parity check.
+# rapidfuzz>=3.0

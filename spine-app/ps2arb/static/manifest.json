@@ -1,0 +1,13 @@
+{
+  "name": "Spine — PS2 field valuation",
+  "short_name": "Spine",
+  "description": "What's the most I should pay for this disc?",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0B0E13",
+  "theme_color": "#0B0E13",
+  "icons": [
+    {"src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable"}
+  ]
+}

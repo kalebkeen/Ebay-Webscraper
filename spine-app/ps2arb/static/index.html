@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0B0E13">
+<title>Spine — PS2 field valuation</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..900&family=Inter+Tight:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ---------------------------------------------------------------------
+   Palette taken from the object itself: the near-black of a PS2 jewel
+   case, the blue-violet of a disc underside, and the Greatest Hits red.
+   The red is functional only -- it marks the budget reprint and appears
+   nowhere else, so a glance at the card edge answers the variant
+   question without reading anything.
+   ------------------------------------------------------------------ */
+:root{
+  --ink:#0B0E13; --slate:#151B24; --raise:#1C2531; --edge:#28323F;
+  --paper:#EDF1F6; --mist:#7E8B9C; --dim:#4E5A6A;
+  --disc:#5B6EE1; --disc-lo:#3D4CB8;
+  --hits:#C8322B;
+  --warn:#D4A037;
+  --pad:16px; --r:14px;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--ink);color:var(--paper)}
+body{
+  font-family:'Inter Tight',system-ui,sans-serif;
+  padding:max(12px,env(safe-area-inset-top)) var(--pad)
+          calc(28px + env(safe-area-inset-bottom));
+  max-width:560px;margin:0 auto;min-height:100vh;
+}
+h1{
+  font-family:'Archivo',sans-serif;font-variation-settings:'wdth' 112,'wght' 800;
+  font-size:19px;letter-spacing:-.02em;margin:0;text-transform:uppercase;
+}
+.head{display:flex;align-items:baseline;gap:10px;margin-bottom:14px}
+.head small{
+  font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--dim);
+  letter-spacing:.06em;text-transform:uppercase;
+}
+.mono{font-family:'IBM Plex Mono',monospace}
+
+/* ---- mock-data banner: this must never be mistaken for a real price -- */
+.banner{
+  background:rgba(212,160,55,.11);border:1px solid rgba(212,160,55,.34);
+  color:var(--warn);border-radius:10px;padding:9px 12px;margin-bottom:14px;
+  font-size:12px;line-height:1.45;
+}
+.banner b{font-weight:600}
+
+/* ---- scanner ---- */
+.scan{
+  position:relative;border-radius:var(--r);overflow:hidden;
+  background:var(--slate);border:1px solid var(--edge);margin-bottom:12px;
+}
+.scan video{width:100%;display:block;aspect-ratio:16/10;object-fit:cover;
+  background:#000}
+.scan.off video{display:none}
+.scan-idle{
+  display:flex;align-items:center;justify-content:center;gap:10px;
+  padding:20px 16px;width:100%;background:none;border:0;color:var(--paper);
+  font-family:'Inter Tight',sans-serif;font-size:15px;font-weight:500;
+  cursor:pointer;
+}
+.scan.on .scan-idle{display:none}
+.reticle{
+  position:absolute;inset:22% 12%;border:2px solid rgba(91,110,225,.85);
+  border-radius:8px;pointer-events:none;
+}
+.scan.off .reticle{display:none}
+.scan-stop{
+  position:absolute;right:10px;top:10px;background:rgba(11,14,19,.82);
+  border:1px solid var(--edge);color:var(--paper);border-radius:8px;
+  padding:6px 11px;font-size:12px;cursor:pointer;
+}
+.scan.off .scan-stop{display:none}
+
+/* ---- search ---- */
+.field{position:relative;margin-bottom:12px}
+input[type=text],input[type=number]{
+  width:100%;background:var(--slate);border:1px solid var(--edge);
+  color:var(--paper);border-radius:11px;padding:13px 14px;font-size:16px;
+  font-family:'Inter Tight',sans-serif;
+}
+input:focus{outline:2px solid var(--disc);outline-offset:1px;border-color:transparent}
+input::placeholder{color:var(--dim)}
+.results{
+  position:absolute;top:calc(100% + 5px);left:0;right:0;z-index:20;
+  background:var(--raise);border:1px solid var(--edge);border-radius:11px;
+  overflow:hidden;box-shadow:0 18px 44px rgba(0,0,0,.55);
+}
+.results:empty{display:none}
+.results button{
+  display:flex;justify-content:space-between;align-items:center;gap:10px;
+  width:100%;background:none;border:0;border-bottom:1px solid var(--edge);
+  color:var(--paper);padding:12px 14px;font-size:14.5px;text-align:left;
+  cursor:pointer;font-family:inherit;
+}
+.results button:last-child{border-bottom:0}
+.results button:hover,.results button:focus-visible{background:var(--slate)}
+.results .liq{font-size:10.5px;color:var(--dim);letter-spacing:.05em;
+  text-transform:uppercase;font-family:'IBM Plex Mono',monospace}
+
+/* ---- chips ---- */
+.group{margin-bottom:11px}
+.glab{
+  font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--dim);
+  letter-spacing:.11em;text-transform:uppercase;margin-bottom:6px;
+}
+.chips{display:flex;gap:6px;flex-wrap:wrap}
+.chip{
+  background:var(--slate);border:1px solid var(--edge);color:var(--mist);
+  border-radius:9px;padding:9px 13px;font-size:13.5px;cursor:pointer;
+  font-family:inherit;flex:1;min-width:fit-content;
+}
+.chip[aria-pressed=true]{
+  background:var(--disc-lo);border-color:var(--disc);color:#fff;font-weight:500;
+}
+.chip.hits[aria-pressed=true]{background:#8E241E;border-color:var(--hits)}
+.chip:focus-visible{outline:2px solid var(--disc);outline-offset:2px}
+
+/* ---- the verdict card -----------------------------------------------
+   The signature: a spine strip down the left edge, coloured like the
+   real thing. Black label is near-black with a hairline keyline;
+   Greatest Hits is the red. Peripheral vision answers the variant
+   question before you read a word.
+   ------------------------------------------------------------------ */
+.card{
+  position:relative;background:var(--slate);border:1px solid var(--edge);
+  border-radius:var(--r);padding:18px 18px 16px 30px;margin-top:16px;
+  overflow:hidden;
+}
+.spine{
+  position:absolute;left:0;top:0;bottom:0;width:14px;background:#05070A;
+  border-right:1px solid var(--edge);
+}
+.spine::after{
+  content:'';position:absolute;left:3px;right:3px;top:10px;bottom:10px;
+  border-left:1.5px solid rgba(237,241,246,.5);
+}
+.card[data-variant=greatest_hits] .spine{background:var(--hits)}
+.card[data-variant=greatest_hits] .spine::after{
+  border-left-color:rgba(255,255,255,.75)}
+.card[data-variant=unknown] .spine{
+  background:repeating-linear-gradient(180deg,#05070A 0 7px,#1B222C 7px 14px)}
+.card[data-variant=unknown] .spine::after{border-left-color:var(--dim)}
+
+.ctitle{font-size:17px;font-weight:600;line-height:1.25;margin:0 0 3px}
+.csub{
+  font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--mist);
+  letter-spacing:.05em;margin-bottom:16px;
+}
+
+/* The price tag: hard corners against everything else's soft radius, so
+   it reads as a sticker applied to the case rather than part of the UI. */
+.tag{display:inline-block;background:var(--disc);color:#fff;
+  padding:9px 15px 11px;border-radius:0}
+.tag.pass{background:var(--raise);color:var(--mist);
+  border:1px solid var(--edge)}
+.tag .lab{
+  font-family:'IBM Plex Mono',monospace;font-size:9.5px;letter-spacing:.16em;
+  text-transform:uppercase;opacity:.85;display:block;margin-bottom:1px;
+}
+.tag .amt{
+  font-family:'Archivo',sans-serif;font-variation-settings:'wdth' 118,'wght' 900;
+  font-size:46px;line-height:.92;letter-spacing:-.035em;display:block;
+  font-variant-numeric:tabular-nums;
+}
+.verdict{
+  display:inline-block;margin-left:11px;vertical-align:top;margin-top:11px;
+  font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.12em;
+  padding:5px 9px;border-radius:6px;text-transform:uppercase;
+}
+.verdict.take{background:rgba(91,110,225,.18);color:#98A6FF}
+.verdict.pass{background:rgba(200,50,43,.15);color:#E8837C}
+
+.rows{margin-top:17px;border-top:1px solid var(--edge);padding-top:13px}
+.row{display:flex;justify-content:space-between;gap:12px;
+  font-family:'IBM Plex Mono',monospace;font-size:12.5px;padding:4px 0}
+.row span:first-child{color:var(--dim)}
+.row span:last-child{font-variant-numeric:tabular-nums}
+
+.notes{margin-top:13px;display:flex;flex-direction:column;gap:6px}
+.note{font-size:11.5px;line-height:1.45;color:var(--mist);
+  padding-left:13px;position:relative}
+.note::before{content:'';position:absolute;left:0;top:6px;width:5px;height:5px;
+  border-radius:50%;background:var(--dim)}
+.note.warn{color:var(--warn)}
+.note.warn::before{background:var(--warn)}
+
+.empty{color:var(--dim);font-size:13.5px;text-align:center;padding:34px 18px;
+  line-height:1.55}
+.spinner{color:var(--mist);font-family:'IBM Plex Mono',monospace;font-size:12px;
+  text-align:center;padding:26px}
+
+/* ---- teach a new code ---- */
+.teach{background:rgba(91,110,225,.1);border:1px solid rgba(91,110,225,.4);
+  border-radius:11px;padding:13px;margin-top:12px}
+.teach p{margin:0 0 9px;font-size:13px;line-height:1.45}
+.teach .code{font-family:'IBM Plex Mono',monospace;color:var(--disc)}
+.btn{background:var(--disc);color:#fff;border:0;border-radius:9px;
+  padding:11px 15px;font-size:14px;font-weight:500;cursor:pointer;
+  font-family:inherit;width:100%}
+.btn:focus-visible{outline:2px solid var(--paper);outline-offset:2px}
+.btn.ghost{background:none;border:1px solid var(--edge);color:var(--mist)}
+
+@media (prefers-reduced-motion:no-preference){
+  .card{animation:rise .22s ease-out}
+  @keyframes rise{from{opacity:0;transform:translateY(7px)}}
+}
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>Spine</h1>
+  <small>ps2 field valuation</small>
+</div>
+
+<div class="banner" id="banner" hidden></div>
+
+<div class="scan off" id="scan">
+  <button class="scan-idle" id="scanStart">
+    <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/>
+      <path d="M7 8v8M10 8v8M13 8v8M17 8v8"/>
+    </svg>
+    Scan the barcode
+  </button>
+  <video id="video" playsinline muted></video>
+  <div class="reticle"></div>
+  <button class="scan-stop" id="scanStop">Stop</button>
+</div>
+
+<div class="field">
+  <input type="text" id="q" placeholder="or type a title" autocomplete="off"
+         enterkeyhint="search">
+  <div class="results" id="results"></div>
+</div>
+
+<div id="teach"></div>
+
+<div class="group">
+  <div class="glab">Variant</div>
+  <div class="chips" id="variant">
+    <button class="chip" data-v="black_label" aria-pressed="false">Black label</button>
+    <button class="chip hits" data-v="greatest_hits" aria-pressed="false">Greatest Hits</button>
+    <button class="chip" data-v="unknown" aria-pressed="true">Not sure</button>
+  </div>
+</div>
+
+<div class="group">
+  <div class="glab">What's in the case</div>
+  <div class="chips" id="completeness">
+    <button class="chip" data-v="loose" aria-pressed="true">Disc only</button>
+    <button class="chip" data-v="disc_case" aria-pressed="false">+ Case</button>
+    <button class="chip" data-v="cib" aria-pressed="false">+ Manual</button>
+  </div>
+</div>
+
+<div class="group">
+  <div class="glab">How you'd sell it</div>
+  <div class="chips" id="pickup">
+    <button class="chip" data-v="1" aria-pressed="true">Local pickup</button>
+    <button class="chip" data-v="0" aria-pressed="false">Ship it</button>
+  </div>
+</div>
+
+<div class="group">
+  <div class="glab">Their price (optional)</div>
+  <input type="number" id="ask" placeholder="0.00" inputmode="decimal" step="0.01">
+</div>
+
+<div id="out">
+  <div class="empty">Scan a barcode or pick a title.<br>You'll get the most
+    you should pay for it.</div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const state = {title:null, variant:'unknown', completeness:'loose',
+               pickup:true, ask:null, pendingUpc:null};
+
+/* ------------------------------------------------------------------ */
+/* chips                                                               */
+function wireChips(id, key, cast){
+  $('#'+id).addEventListener('click', e=>{
+    const b = e.target.closest('.chip'); if(!b) return;
+    [...e.currentTarget.children].forEach(c=>c.setAttribute('aria-pressed','false'));
+    b.setAttribute('aria-pressed','true');
+    state[key] = cast ? cast(b.dataset.v) : b.dataset.v;
+    value();
+  });
+}
+wireChips('variant','variant');
+wireChips('completeness','completeness');
+wireChips('pickup','pickup', v=>v==='1');
+
+let askTimer;
+$('#ask').addEventListener('input', e=>{
+  clearTimeout(askTimer);
+  askTimer = setTimeout(()=>{
+    const v = parseFloat(e.target.value);
+    state.ask = isNaN(v) ? null : v;
+    value();
+  }, 320);
+});
+
+/* ------------------------------------------------------------------ */
+/* title search                                                        */
+let qTimer;
+$('#q').addEventListener('input', e=>{
+  clearTimeout(qTimer);
+  const q = e.target.value.trim();
+  if(q.length < 2){ $('#results').innerHTML=''; return; }
+  qTimer = setTimeout(()=>search(q), 220);
+});
+
+async function search(q){
+  try{
+    const r = await fetch('/api/titles?q='+encodeURIComponent(q));
+    const d = await r.json();
+    $('#results').innerHTML = (d.results||[]).map(x=>
+      `<button data-t="${esc(x.title)}" data-gh="${x.has_greatest_hits?1:0}">
+         <span>${esc(x.title)}</span><span class="liq">${x.liquidity}</span>
+       </button>`).join('');
+  }catch(err){ $('#results').innerHTML=''; }
+}
+
+$('#results').addEventListener('click', e=>{
+  const b = e.target.closest('button'); if(!b) return;
+  pick(b.dataset.t, b.dataset.gh === '1');
+});
+
+function pick(title, hasGH){
+  state.title = title;
+  $('#q').value = title;
+  $('#results').innerHTML = '';
+  // A title with no budget reprint has only one variant that ever existed,
+  // so asking the user is a pointless tap. Lock it and move on.
+  if(hasGH === false){
+    setChip('variant','black_label');
+    state.variant = 'black_label';
+  }
+  if(state.pendingUpc) offerTeach(state.pendingUpc, title);
+  value();
+}
+
+function setChip(group, v){
+  [...$('#'+group).children].forEach(c=>
+    c.setAttribute('aria-pressed', String(c.dataset.v === v)));
+}
+
+/* ------------------------------------------------------------------ */
+/* barcode                                                             */
+let stream = null, detector = null, raf = null;
+
+$('#scanStart').addEventListener('click', startScan);
+$('#scanStop').addEventListener('click', stopScan);
+
+/* Native scanner, when running inside the APK.
+   BarcodeDetector is a Chrome API and is NOT reliably exposed in Android's
+   WebView -- relying on it alone meant the scan button could report "this
+   browser has no barcode reader" from inside our own app. The Kotlin side
+   provides window.SpineNative; it wins whenever it is present. */
+function nativeScan(){
+  return new Promise((resolve, reject) => {
+    window.__spineScanResult = (r) => {
+      window.__spineScanResult = null;
+      if(r && r.code) resolve(r.code);
+      else reject(new Error((r && r.error) || 'scan cancelled'));
+    };
+    try { window.SpineNative.scan(); }
+    catch(e){ window.__spineScanResult = null; reject(e); }
+  });
+}
+
+async function startScan(){
+  if(window.SpineNative && window.SpineNative.isAvailable &&
+     window.SpineNative.isAvailable()){
+    try {
+      const code = await nativeScan();
+      if(navigator.vibrate) navigator.vibrate(40);
+      await resolveUpc(code);
+    } catch(err){
+      if(!/cancel/i.test(err.message || '')) note('Scan failed: ' + err.message);
+    }
+    return;
+  }
+  if(!('BarcodeDetector' in window)){
+    note('This browser has no barcode reader. Chrome on Android does; '
+         + 'otherwise type the title.');
+    return;
+  }
+  try{
+    detector = new BarcodeDetector({formats:['upc_a','ean_13','upc_e','ean_8']});
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'environment', width:{ideal:1280}}});
+    $('#video').srcObject = stream;
+    await $('#video').play();
+    $('#scan').classList.remove('off'); $('#scan').classList.add('on');
+    tick();
+  }catch(err){
+    note('Camera unavailable: ' + err.message + '. Type the title instead.');
+  }
+}
+
+function stopScan(){
+  cancelAnimationFrame(raf);
+  if(stream) stream.getTracks().forEach(t=>t.stop());
+  stream = null;
+  $('#scan').classList.add('off'); $('#scan').classList.remove('on');
+}
+
+async function tick(){
+  if(!stream) return;
+  try{
+    const codes = await detector.detect($('#video'));
+    if(codes.length){
+      const raw = codes[0].rawValue;
+      if(navigator.vibrate) navigator.vibrate(40);
+      stopScan();
+      resolveUpc(raw);
+      return;
+    }
+  }catch(err){ /* transient decode failures are normal; keep looping */ }
+  raf = requestAnimationFrame(tick);
+}
+
+async function resolveUpc(code){
+  $('#out').innerHTML = '<div class="spinner">Looking up '+esc(code)+'…</div>';
+  try{
+    const d = await (await fetch('/api/upc/'+encodeURIComponent(code))).json();
+    if(d.known){
+      state.pendingUpc = null;
+      $('#teach').innerHTML = '';
+      state.title = d.title; $('#q').value = d.title;
+      if(d.variant && d.variant !== 'unknown'){
+        setChip('variant', d.variant); state.variant = d.variant;
+      }
+      value();
+    }else{
+      state.pendingUpc = d.upc;
+      $('#out').innerHTML = '';
+      $('#teach').innerHTML =
+        `<div class="teach">
+           <p>New code <span class="code">${esc(d.upc)}</span>. Pick the title
+              below and it's saved for next time.</p>
+         </div>`;
+      $('#q').focus();
+    }
+  }catch(err){ note('Lookup failed: ' + err.message); }
+}
+
+function offerTeach(code, title){
+  $('#teach').innerHTML =
+    `<div class="teach">
+       <p>Save <span class="code">${esc(code)}</span> as
+          <b>${esc(title)}</b>${state.variant!=='unknown'
+            ? ' ('+state.variant.replace('_',' ')+')' : ''}?</p>
+       <button class="btn" id="teachYes">Remember this barcode</button>
+     </div>`;
+  $('#teachYes').addEventListener('click', async ()=>{
+    await fetch('/api/upc/'+encodeURIComponent(code), {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({title, variant:state.variant})});
+    state.pendingUpc = null;
+    $('#teach').innerHTML = '<div class="teach"><p>Saved.</p></div>';
+    setTimeout(()=>{ $('#teach').innerHTML=''; }, 1600);
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* valuation                                                           */
+let valTimer;
+function value(){
+  if(!state.title) return;
+  clearTimeout(valTimer);
+  valTimer = setTimeout(doValue, 60);
+}
+
+async function doValue(){
+  $('#out').innerHTML = '<div class="spinner">Pricing…</div>';
+  try{
+    const r = await fetch('/api/value', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        title:state.title, variant:state.variant,
+        completeness:state.completeness, local_pickup:state.pickup,
+        ask:state.ask})});
+    render(await r.json());
+  }catch(err){ note('Could not reach the server: ' + err.message); }
+}
+
+const money = n => '$' + Number(n).toFixed(2);
+
+function render(d){
+  if(d.source_is_mock){
+    $('#banner').hidden = false;
+    $('#banner').innerHTML = '<b>Synthetic prices.</b> The comp source is '
+      + 'still the mock. Swap it in service.py before trusting a number.';
+  }
+  if(d.detail){ note(d.detail); return; }
+  if(!d.quotable){
+    $('#out').innerHTML = `<div class="card" data-variant="unknown">
+      <div class="spine"></div>
+      <p class="ctitle">${esc(d.title||'')}</p>
+      <div class="csub">no usable comps</div>
+      <div class="notes">${(d.warnings||[]).map(w=>
+        `<div class="note warn">${esc(w)}</div>`).join('')}</div></div>`;
+    return;
+  }
+
+  const bid = d.max_bid || 0;
+  const hasAsk = d.ask != null;
+  const take = hasAsk ? d.take : bid > 0;
+  const tagCls = take ? '' : ' pass';
+
+  const rows = [
+    ['sells for', money(d.conservative_resale)],
+    ['range', money(d.p25) + ' – ' + money(d.p75)],
+    ['clears in', d.days_to_sell ? Math.round(d.days_to_sell)+' days' : '—'],
+    ['confidence', d.confidence + ' · n=' + Math.round(d.n_effective)],
+    ['floor', money(d.structural_floor)],
+  ];
+  if(hasAsk){
+    rows.unshift(['their price', money(d.ask)]);
+    rows.push(['your profit', money(d.expected_profit)]);
+  }
+
+  const notes = [];
+  if(d.repro_risk === 'high')
+    notes.push(['warn','High-fake title. Check the disc face and hub codes '
+                     + 'before you hand over money.']);
+  if(d.priced_as_variant === 'unknown' && d.has_greatest_hits)
+    notes.push(['warn','Variant not set — priced as the cheaper reprint. '
+                     + 'Check the spine; black label is worth more.']);
+  if(d.liquidity === 'thin')
+    notes.push(['','Thin market. It will sell, but slowly.']);
+  (d.reasons||[]).slice(0,2).forEach(r=>notes.push(['', cap(r)]));
+
+  $('#out').innerHTML = `
+    <div class="card" data-variant="${esc(d.priced_as_variant)}">
+      <div class="spine"></div>
+      <p class="ctitle">${esc(d.title)}</p>
+      <div class="csub">${esc(d.priced_as_variant.replace('_',' '))} ·
+        ${esc(state.completeness.replace('_',' '))} ·
+        ${state.pickup ? 'local' : 'shipped'}</div>
+      <div>
+        <div class="tag${tagCls}">
+          <span class="lab">pay up to</span>
+          <span class="amt">${money(bid)}</span>
+        </div>
+        <span class="verdict ${take?'take':'pass'}">${
+          hasAsk ? (take?'buy it':'walk away') : (bid>0?'worth doing':'no room')
+        }</span>
+      </div>
+      <div class="rows">${rows.map(([k,v])=>
+        `<div class="row"><span>${esc(k)}</span><span>${esc(v)}</span></div>`
+      ).join('')}</div>
+      ${notes.length ? `<div class="notes">${notes.map(([c,t])=>
+        `<div class="note ${c}">${esc(t)}</div>`).join('')}</div>` : ''}
+    </div>`;
+}
+
+function note(msg){
+  $('#out').innerHTML = `<div class="empty">${esc(msg)}</div>`;
+}
+const esc = s => String(s==null?'':s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const cap = s => String(s).charAt(0).toUpperCase() + String(s).slice(1);
+
+/* health check on load so the mock banner appears before any lookup */
+fetch('/api/health').then(r=>r.json()).then(d=>{
+  if(d.comp_source && d.comp_source.startsWith('MOCK')){
+    $('#banner').hidden = false;
+    $('#banner').innerHTML = '<b>Synthetic prices.</b> The comp source is '
+      + 'still the mock. Swap it in service.py before trusting a number.';
+  }
+}).catch(()=>{});
+
+if('serviceWorker' in navigator)
+  navigator.serviceWorker.register('/sw.js').catch(()=>{});
+</script>
+</body>
+</html>
