@@ -1,0 +1,94 @@
+name: Build APK
+
+# Builds the installable app and attaches it to a Release, so there is a
+# permanent link you can open on your phone.
+#
+# Runs automatically on every push, and on demand from the Actions tab.
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed to publish the Release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # AGP 8.7 requires JDK 17. The runner ships several; pin it.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # The pipeline lives in two places; this copies it into the APK bundle
+      # and fails if a non-stdlib import has crept in, which would need a pip
+      # block in Gradle and a wheel that exists for Android.
+      - name: Sync pipeline into the app bundle
+        run: |
+          chmod +x sync_android.sh
+          ./sync_android.sh
+
+      # Catches a broken pipeline here rather than after you have installed it.
+      - name: Run the test suites
+        run: |
+          for f in test_corpus.py test_adversarial.py test_comps.py test_economics.py; do
+            echo "--- $f"
+            python3 "$f"
+          done
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # No wrapper is checked in, so generate one at the pinned version.
+      - name: Generate the Gradle wrapper
+        working-directory: android
+        run: gradle wrapper --gradle-version 8.9
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Name the output
+        id: name
+        run: |
+          echo "stamp=$(date +'%Y%m%d-%H%M')" >> "$GITHUB_OUTPUT"
+
+      # Available from the Actions run page. Artifacts expire after 90 days.
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spine-apk-${{ steps.name.outputs.stamp }}
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 90
+
+      # The Release is the part that matters: a stable URL that works from a
+      # phone browser, unlike artifacts, which require being signed in.
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ steps.name.outputs.stamp }}
+          name: Spine ${{ steps.name.outputs.stamp }}
+          body: |
+            Debug build. Install on Android by opening this page on your
+            phone and tapping the `.apk` below.
+
+            You will be asked to allow installs from your browser once.
+
+            Prices are synthetic until a real comp source is configured —
+            the app shows a banner while that is the case.
+          files: android/app/build/outputs/apk/debug/app-debug.apk
+          generate_release_notes: false
