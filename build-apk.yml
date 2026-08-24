@@ -83,6 +83,28 @@ jobs:
             echo "repointed the manifest icon away from the missing mipmap"
             changed=1
           fi
+          # Chaquopy is published from its own Maven repository as well as
+          # Maven Central, and which versions live where has varied. Adding
+          # it costs nothing when unused and removes a failure mode that
+          # kills Gradle within seconds of startup.
+          SETTINGS=../../../settings.gradle.kts
+          if [ -f "$SETTINGS" ] && ! grep -q 'chaquo.com/maven' "$SETTINGS"; then
+            python3 - "$SETTINGS" <<'PATCH'
+          import re, sys
+          p = sys.argv[1]
+          s = open(p).read()
+          s = s.replace("gradlePluginPortal()",
+                        'gradlePluginPortal()\n        maven { url = uri("https://chaquo.com/maven") }', 1)
+          s = re.sub(r"(dependencyResolutionManagement \{.*?repositories \{\n)",
+                     r'\1        maven { url = uri("https://chaquo.com/maven") }\n',
+                     s, count=1, flags=re.S)
+          open(p, "w").write(s)
+          PATCH
+            sed -i 's/^          //' /dev/null 2>/dev/null || true
+            echo "added chaquo.com/maven to settings.gradle.kts"
+            changed=1
+          fi
+
           [ "$changed" = "0" ] && echo "already correct — nothing to do"
           echo "--- icon reference now:"
           grep -n 'android:icon' AndroidManifest.xml || true
@@ -152,12 +174,32 @@ jobs:
           echo "ndk dir contents:"
           ls "${ANDROID_HOME}/ndk" 2>/dev/null || echo "  (no ndk installed)"
 
-      # Invoked directly rather than through a wrapper. Generating one first
-      # was an extra failure point that bought nothing in CI, where the
-      # Gradle version is already pinned by the step above.
+      # Output is teed to a file so the failure can be republished to the
+      # job summary below. Reading a CI failure should not require knowing
+      # how to navigate a CI log.
       - name: Build debug APK
         working-directory: ${{ steps.find.outputs.android }}
-        run: gradle assembleDebug --stacktrace --no-daemon
+        run: |
+          set -o pipefail
+          gradle assembleDebug --stacktrace --no-daemon 2>&1 | tee /tmp/build.log
+
+      # Puts the actual error on the FIRST page of the run, not buried in a
+      # step you have to expand. This exists because three fixes were made
+      # from inferred causes rather than the error text.
+      - name: Show the failure
+        if: failure()
+        run: |
+          {
+            echo "## Build failed"
+            echo ""
+            echo "Last 60 lines of Gradle output:"
+            echo ""
+            echo '```'
+            tail -n 60 /tmp/build.log 2>/dev/null || echo "(gradle produced no log — it failed before starting)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "--- also echoed here ---"
+          tail -n 60 /tmp/build.log 2>/dev/null || true
 
       - name: Name the output
         id: name
