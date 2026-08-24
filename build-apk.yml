@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: write        # needed to publish the Release
+  issues: write          # needed to file the failure report below
 
 jobs:
   build:
@@ -183,23 +184,54 @@ jobs:
           set -o pipefail
           gradle assembleDebug --stacktrace --no-daemon 2>&1 | tee /tmp/build.log
 
-      # Puts the actual error on the FIRST page of the run, not buried in a
-      # step you have to expand. This exists because three fixes were made
-      # from inferred causes rather than the error text.
-      - name: Show the failure
+      # Publish the failure somewhere readable without opening a CI log.
+      #
+      # Four fixes were made here from inferred causes -- timings, step
+      # numbers -- because the error text never reached the person who
+      # needed it. An issue in a public repository is readable by anyone
+      # helping, arrives as a notification, and needs no log navigation.
+      - name: Report the failure
         if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          REPORT=/tmp/report.md
           {
-            echo "## Build failed"
+            echo "Automated build failure report. Close this issue freely;"
+            echo "a new one is filed on each failed run."
             echo ""
-            echo "Last 60 lines of Gradle output:"
+            echo "### Toolchain"
+            echo '```'
+            echo "java:   $(java -version 2>&1 | head -1)"
+            echo "gradle: $(gradle --version 2>/dev/null | grep -i '^Gradle' || echo 'NOT ON PATH')"
+            echo "sdk:    ${ANDROID_HOME:-unset}"
+            echo "ndk:    $(ls "${ANDROID_HOME}/ndk" 2>/dev/null | tr '\n' ' ' || echo none)"
+            echo '```'
             echo ""
+            echo "### Gradle output (last 200 lines)"
             echo '```'
-            tail -n 60 /tmp/build.log 2>/dev/null || echo "(gradle produced no log — it failed before starting)"
+            if [ -f /tmp/build.log ]; then
+              tail -n 200 /tmp/build.log
+            else
+              echo "No gradle log — the run failed BEFORE the build step started."
+            fi
             echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          echo "--- also echoed here ---"
-          tail -n 60 /tmp/build.log 2>/dev/null || true
+            echo ""
+            echo "### settings.gradle.kts"
+            echo '```kotlin'
+            cat "${{ steps.find.outputs.android }}/settings.gradle.kts" 2>/dev/null || echo "(not found)"
+            echo '```'
+            echo ""
+            echo "### app/build.gradle.kts"
+            echo '```kotlin'
+            cat "${{ steps.find.outputs.android }}/app/build.gradle.kts" 2>/dev/null || echo "(not found)"
+            echo '```'
+          } > "$REPORT"
+
+          cat "$REPORT" >> "$GITHUB_STEP_SUMMARY"
+          gh issue create \
+            --title "Build failure $(date -u +'%Y-%m-%d %H:%M UTC')" \
+            --body-file "$REPORT" || echo "could not file an issue; see the summary above"
 
       - name: Name the output
         id: name
