@@ -33,15 +33,17 @@ import core
 _SOURCE = None
 _SOURCE_IS_REAL = False
 _UPC = None
+_SCANDEX = None
 _STATIC = Path(__file__).parent / "static"
 
 
 def configure(source, source_is_real: bool = False, upc_index=None,
-              static_dir: Path | None = None) -> None:
-    global _SOURCE, _SOURCE_IS_REAL, _UPC, _STATIC
+              static_dir: Path | None = None, scandex_client=None) -> None:
+    global _SOURCE, _SOURCE_IS_REAL, _UPC, _STATIC, _SCANDEX
     _SOURCE = source
     _SOURCE_IS_REAL = source_is_real
     _UPC = upc_index
+    _SCANDEX = scandex_client
     if static_dir:
         _STATIC = Path(static_dir)
 
@@ -116,13 +118,26 @@ class Handler(BaseHTTPRequestHandler):
                 code = urllib.parse.unquote(route[len("/api/upc/"):])
                 if _UPC is None:
                     return self._send(503, {"detail": "no upc index"})
-                found = _UPC.lookup(code)
-                if not found:
-                    return self._send(200, {"upc": code, "known": False})
-                entry = core.entry_for(found.title)
+
+                # Local index first, ScanDex second. The local entry carries
+                # a CONFIRMED variant; a ScanDex hit carries only a title,
+                # and preferring the remote source would discard the more
+                # valuable answer. See scandex.resolve.
+                import scandex as _sd
+                res = _sd.resolve(code, _UPC, _SCANDEX)
+                if not res.title:
+                    return self._send(200, {
+                        "upc": res.barcode, "known": False,
+                        "warnings": res.warnings})
+
+                entry = core.entry_for(res.title)
                 return self._send(200, {
-                    "upc": code, "known": True, "title": found.title,
-                    "variant": getattr(found, "variant", "unknown"),
+                    "upc": res.barcode, "known": True, "title": res.title,
+                    "variant": res.variant,
+                    "source": res.source,
+                    "trusted": res.confident,
+                    "needs_variant_check": res.source == "scandex",
+                    "warnings": res.warnings,
                     "has_greatest_hits": entry.has_greatest_hits if entry else None,
                     "liquidity": entry.liquidity if entry else None,
                     "repro_risk": entry.repro_risk if entry else None})
@@ -190,7 +205,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def start(port: int = 0, source=None, source_is_real: bool = False,
-          upc_index=None, static_dir: str | None = None) -> int:
+          upc_index=None, static_dir: str | None = None,
+          scandex_client=None) -> int:
     """
     Start the server on a daemon thread and return the bound port.
 
@@ -214,7 +230,8 @@ def start(port: int = 0, source=None, source_is_real: bool = False,
             upc_index = None
 
     configure(source, source_is_real, upc_index,
-              Path(static_dir) if static_dir else None)
+              Path(static_dir) if static_dir else None,
+              scandex_client=scandex_client)
 
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     bound = httpd.server_address[1]
