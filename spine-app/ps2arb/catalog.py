@@ -117,8 +117,10 @@ def _load_bulk() -> list[Title]:
       a title is unresearched: guessing Black Label and being wrong overpays
       3-5x, so we never do it for a title we haven't checked. (The dataclass
       default of False would do exactly the wrong thing here.)
-    - liquidity='low' and repro_risk='low' are conservative placeholders until
-      real sold-through data replaces them.
+    - liquidity is a conservative offline PRIOR carried on each catalog_data
+      row (region breadth + known mega-franchises), to be replaced by measured
+      eBay data later; see tools/refine_liquidity.py. repro_risk='low' stays a
+      placeholder.
     """
     try:
         import catalog_data
@@ -126,14 +128,16 @@ def _load_bulk() -> list[Title]:
         return []
     seen = {strip_noise(k) for t in _SEED for k in t.search_keys()}
     bulk: list[Title] = []
-    for canonical, regions, aliases in catalog_data.BULK:
+    for row in catalog_data.BULK:
+        canonical, regions, aliases = row[0], row[1], row[2]
+        liquidity = row[3] if len(row) > 3 else "low"
         if strip_noise(canonical) in seen:
             continue
         bulk.append(Title(
             canonical=canonical,
             aliases=list(aliases),
             has_greatest_hits=True,
-            liquidity="low",
+            liquidity=liquidity,
             repro_risk="low",
             regions=list(regions),
             curated=False,

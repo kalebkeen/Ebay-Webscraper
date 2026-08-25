@@ -305,6 +305,25 @@ class EbayClient:
             if offset >= total:
                 return
 
+    def active_count(self, query: str, *, category: str | None = CATEGORY_VIDEO_GAMES,
+                     filters: str | None = None) -> int:
+        """Total active listings matching a query, in one call.
+
+        The Browse search response carries a `total` for the whole result set,
+        so a single request with limit=1 gives the count without paging. This
+        is a *supply* proxy for liquidity, not sell-through — a title can have
+        many stale listings that never move. Real velocity needs sold data
+        (Marketplace Insights, or store.py harvesting over time).
+        """
+        base = f"{ENDPOINTS[self.auth.env]['browse']}/item_summary/search"
+        params: dict[str, Any] = {"q": query, "limit": "1", "offset": "0"}
+        if category:
+            params["category_ids"] = category
+        if filters:
+            params["filter"] = filters
+        payload = self._get(base + "?" + urllib.parse.urlencode(params))
+        return int(payload.get("total", 0))
+
     def item_detail(self, item_id: str) -> dict:
         """Full item record, including the description.
 
