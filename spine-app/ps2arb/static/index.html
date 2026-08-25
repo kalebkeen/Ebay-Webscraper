@@ -197,6 +197,17 @@ input::placeholder{color:var(--dim)}
 .spinner{color:var(--mist);font-family:'IBM Plex Mono',monospace;font-size:12px;
   text-align:center;padding:26px}
 
+/* ---- setup / keys ---- */
+.setup{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+       padding:12px 14px;margin-bottom:14px}
+.setup summary{cursor:pointer;font-size:13px;font-weight:600;letter-spacing:.01em}
+.setup .muted{font-size:12px;line-height:1.45;color:var(--dim);margin:8px 0}
+.skey{display:block;margin:10px 0 4px;font-size:12px;color:var(--dim)}
+.skey input{width:100%;margin-top:5px;background:var(--bg);color:var(--fg);
+            border:1px solid var(--line);border-radius:9px;padding:10px 11px;
+            font-size:16px;font-family:inherit}
+#keyState{margin-top:9px;font-size:12px}
+
 /* ---- teach a new code ---- */
 .teach{background:rgba(91,110,225,.1);border:1px solid rgba(91,110,225,.4);
   border-radius:11px;padding:13px;margin-top:12px}
@@ -243,6 +254,36 @@ input::placeholder{color:var(--dim)}
 </div>
 
 <div id="teach"></div>
+
+<details id="setup" class="setup">
+  <summary>Barcode lookup &amp; API keys</summary>
+  <p class="muted">
+    Without a key, a scanned barcode has nothing to resolve against and you
+    type the title by hand. Keys are stored only on this device.
+  </p>
+
+  <label class="skey">eBay client ID
+    <input type="text" id="s_ebay_id" autocomplete="off" spellcheck="false">
+  </label>
+  <label class="skey">eBay client secret
+    <input type="password" id="s_ebay_secret" autocomplete="off">
+  </label>
+  <p class="muted">
+    Best barcode source — eBay knows the <b>pressing</b>, so a scan returns
+    black label vs Greatest Hits, not just the game. developer.ebay.com
+  </p>
+
+  <label class="skey">ScanDex token
+    <input type="password" id="s_scandex" autocomplete="off">
+  </label>
+  <p class="muted">
+    Fallback covering ~3,457 PS2 barcodes. Identifies the game only; you
+    still confirm the variant. Free at scandex.gamery.app
+  </p>
+
+  <button class="btn" id="saveKeys">Save keys</button>
+  <div id="keyState" class="muted"></div>
+</details>
 
 <div class="group">
   <div class="glab">Variant</div>
@@ -312,6 +353,54 @@ $('#ask').addEventListener('input', e=>{
 
 /* ------------------------------------------------------------------ */
 /* title search                                                        */
+/* ---- API keys ---- */
+async function loadKeys(){
+  try{
+    const d = await (await fetch('/api/settings')).json();
+    if(!d.available) return;
+    const f = d.fields || {};
+    if(f.ebay_client_id && f.ebay_client_id.set)
+      $('#s_ebay_id').value = f.ebay_client_id.hint;
+    for(const [id,key] of [['s_ebay_secret','ebay_client_secret'],
+                           ['s_scandex','scandex_token']]){
+      if(f[key] && f[key].set) $('#'+id).placeholder = 'saved ' + f[key].hint;
+    }
+    showKeyState(d);
+  }catch(e){ /* settings are optional */ }
+}
+
+function showKeyState(d){
+  const bits = [];
+  bits.push(d.ebay_ready ? 'eBay: on (variant-accurate)' : 'eBay: off');
+  bits.push(d.scandex_ready ? 'ScanDex: on' : 'ScanDex: off');
+  $('#keyState').textContent = bits.join(' · ');
+  // Nudge the panel open while nothing is configured, because a scan cannot
+  // resolve a title without at least one of these.
+  if(!d.ebay_ready && !d.scandex_ready) $('#setup').open = true;
+}
+
+$('#saveKeys').addEventListener('click', async ()=>{
+  const payload = {};
+  const id = $('#s_ebay_id').value.trim();
+  const sec = $('#s_ebay_secret').value.trim();
+  const sd = $('#s_scandex').value.trim();
+  if(id) payload.ebay_client_id = id;
+  if(sec) payload.ebay_client_secret = sec;
+  if(sd) payload.scandex_token = sd;
+  if(!Object.keys(payload).length){ $('#keyState').textContent = 'Nothing to save.'; return; }
+  $('#keyState').textContent = 'Saving…';
+  try{
+    const r = await fetch('/api/settings', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    const d = await r.json();
+    if(!r.ok){ $('#keyState').textContent = d.detail || 'Could not save.'; return; }
+    $('#s_ebay_secret').value = ''; $('#s_scandex').value = '';
+    showKeyState(d);
+    $('#keyState').textContent += ' — saved.';
+  }catch(e){ $('#keyState').textContent = 'Could not save: ' + e.message; }
+});
+loadKeys();
+
 let qTimer;
 $('#q').addEventListener('input', e=>{
   clearTimeout(qTimer);
@@ -437,10 +526,41 @@ async function resolveUpc(code){
     const d = await (await fetch('/api/upc/'+encodeURIComponent(code))).json();
     if(d.known){
       state.pendingUpc = null;
-      $('#teach').innerHTML = '';
       state.title = d.title; $('#q').value = d.title;
+      $('#results').innerHTML = '';
       if(d.variant && d.variant !== 'unknown'){
         setChip('variant', d.variant); state.variant = d.variant;
+      }
+
+      // Say where the answer came from and how far to trust it. A resolved
+      // title with an unconfirmed variant is a 3-5x risk, and silently
+      // preselecting one would hide exactly the thing worth checking.
+      const src = {local:'saved on this device', ebay:'from live eBay listings',
+                   scandex:'from ScanDex'}[d.source] || '';
+      const notes = (d.warnings || []).slice(0, 2);
+      if(src || notes.length || d.needs_variant_check){
+        $('#teach').innerHTML =
+          `<div class="teach">
+             <p><b>${esc(d.title)}</b>${src ? ' — ' + esc(src) : ''}
+                ${d.variant && d.variant !== 'unknown'
+                   ? `· variant <b>${esc(d.variant.replace('_',' '))}</b>` : ''}</p>
+             ${notes.map(w => `<p class="muted">${esc(w)}</p>`).join('')}
+             ${d.source && d.source !== 'local'
+               ? `<button class="btn" id="confirmVariant">Confirm and remember</button>`
+               : ''}
+           </div>`;
+        const cv = $('#confirmVariant');
+        if(cv) cv.addEventListener('click', async ()=>{
+          // Writes the variant you actually see into the local index, so
+          // every later scan of this code answers offline and precisely.
+          await fetch('/api/upc/'+encodeURIComponent(d.upc), {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({title: state.title, variant: state.variant})});
+          $('#teach').innerHTML = '<div class="teach"><p>Saved.</p></div>';
+          setTimeout(()=>{ $('#teach').innerHTML=''; }, 1500);
+        });
+      } else {
+        $('#teach').innerHTML = '';
       }
       value();
     }else{
