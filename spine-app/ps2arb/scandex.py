@@ -230,6 +230,10 @@ class Resolution:
     variant: str = "unknown"
     source: str = "none"          # local | scandex | none
     confident: bool = False
+    # A name we found but could NOT map to the catalog. Passing it back turns
+    # the teach screen from "type the game's name" into "confirm this one",
+    # which is the difference between a blank screen and a single tap.
+    suggest: str | None = None
     warnings: list = field(default_factory=list)
 
 
@@ -275,8 +279,13 @@ def resolve(barcode: str, index: upc.UpcIndex,
         )
     elif hit.status == "wrong_platform":
         out.warnings.append(hit.note)
-    elif hit.note:
-        out.warnings.append(hit.note)
+    else:
+        # Matched a game but not one of ours -- offer the name as a search
+        # seed rather than discarding it.
+        if hit.igdb_name:
+            out.suggest = hit.igdb_name
+        if hit.note:
+            out.warnings.append(hit.note)
     return out
 
 
