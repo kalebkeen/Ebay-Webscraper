@@ -75,6 +75,7 @@ def start() -> int:
     os.environ.setdefault("PS2ARB_STORE", str(data / "harvest.db"))
     os.environ.setdefault("EBAY_TOKEN_CACHE", str(data / "ebay_token.json"))
     os.environ.setdefault("SCANDEX_CACHE", str(data / "scandex_cache.json"))
+    os.environ.setdefault("SPINE_SETTINGS", str(data / "settings.json"))
 
     import local_server
 
