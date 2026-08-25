@@ -34,18 +34,51 @@ _SOURCE = None
 _SOURCE_IS_REAL = False
 _UPC = None
 _SCANDEX = None
+_EBAY = None
+_SETTINGS = None
 _STATIC = Path(__file__).parent / "static"
 
 
+def rebuild_clients() -> None:
+    """Recreate API clients from current settings.
+
+    Called after credentials change so a saved key takes effect immediately.
+    Without this, entering a token appears to do nothing until the app is
+    force-quit, which reads as a bug rather than a restart requirement.
+    """
+    global _SCANDEX, _EBAY
+    if _SETTINGS is None:
+        return
+    _SCANDEX = None
+    _EBAY = None
+    if _SETTINGS.scandex_ready:
+        try:
+            import scandex
+            c = scandex.ScanDexClient(token=_SETTINGS.get("scandex_token"))
+            _SCANDEX = c if c.configured else None
+        except Exception as exc:                       # noqa: BLE001
+            print(f"spine: scandex init failed ({exc})")
+    if _SETTINGS.ebay_ready:
+        try:
+            import ebay
+            _EBAY = ebay.EbayClient()
+        except Exception as exc:                       # noqa: BLE001
+            print(f"spine: ebay init failed ({exc})")
+
+
 def configure(source, source_is_real: bool = False, upc_index=None,
-              static_dir: Path | None = None, scandex_client=None) -> None:
-    global _SOURCE, _SOURCE_IS_REAL, _UPC, _STATIC, _SCANDEX
+              static_dir: Path | None = None, scandex_client=None,
+              settings_store=None) -> None:
+    global _SOURCE, _SOURCE_IS_REAL, _UPC, _STATIC, _SCANDEX, _SETTINGS
     _SOURCE = source
     _SOURCE_IS_REAL = source_is_real
     _UPC = upc_index
     _SCANDEX = scandex_client
+    _SETTINGS = settings_store
     if static_dir:
         _STATIC = Path(static_dir)
+    if _SETTINGS is not None and scandex_client is None:
+        rebuild_clients()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -109,6 +142,15 @@ class Handler(BaseHTTPRequestHandler):
                 stats = _UPC.stats() if _UPC else {}
                 return self._send(200, core.health(_SOURCE_IS_REAL, stats))
 
+            if route == "/api/settings":
+                if _SETTINGS is None:
+                    return self._send(200, {"available": False, "fields": {}})
+                return self._send(200, {
+                    "available": True,
+                    "fields": _SETTINGS.masked(),
+                    "scandex_ready": _SETTINGS.scandex_ready,
+                    "ebay_ready": _SETTINGS.ebay_ready})
+
             if route == "/api/titles":
                 q = (query.get("q") or [""])[0]
                 limit = int((query.get("limit") or ["12"])[0])
@@ -124,7 +166,7 @@ class Handler(BaseHTTPRequestHandler):
                 # and preferring the remote source would discard the more
                 # valuable answer. See scandex.resolve.
                 import scandex as _sd
-                res = _sd.resolve(code, _UPC, _SCANDEX)
+                res = _sd.resolve(code, _UPC, _SCANDEX, _EBAY)
                 if not res.title:
                     return self._send(200, {
                         "upc": res.barcode, "known": False,
@@ -137,7 +179,8 @@ class Handler(BaseHTTPRequestHandler):
                     "variant": res.variant,
                     "source": res.source,
                     "trusted": res.confident,
-                    "needs_variant_check": res.source == "scandex",
+                    "needs_variant_check": (res.variant in (None, "", "unknown")
+                                            or res.source != "local"),
                     "warnings": res.warnings,
                     "has_greatest_hits": entry.has_greatest_hits if entry else None,
                     "liquidity": entry.liquidity if entry else None,
@@ -184,6 +227,17 @@ class Handler(BaseHTTPRequestHandler):
                     ask=float(body.get("ask") or 0.0),
                     ship_in=float(body.get("ship_in") or 0.0)))
 
+            if route == "/api/settings":
+                if _SETTINGS is None:
+                    return self._send(503, {"detail": "settings unavailable"})
+                changed = _SETTINGS.update(body)
+                rebuild_clients()
+                return self._send(200, {
+                    "saved": changed,
+                    "fields": _SETTINGS.masked(),
+                    "scandex_ready": _SETTINGS.scandex_ready,
+                    "ebay_ready": _SETTINGS.ebay_ready})
+
             if route.startswith("/api/upc/"):
                 code = urllib.parse.unquote(route[len("/api/upc/"):])
                 if _UPC is None:
@@ -207,7 +261,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def start(port: int = 0, source=None, source_is_real: bool = False,
           upc_index=None, static_dir: str | None = None,
-          scandex_client=None) -> int:
+          scandex_client=None, settings_store=None) -> int:
     """
     Start the server on a daemon thread and return the bound port.
 
@@ -230,9 +284,17 @@ def start(port: int = 0, source=None, source_is_real: bool = False,
         except Exception:                              # noqa: BLE001
             upc_index = None
 
+    if settings_store is None:
+        try:
+            import settings as _settings
+            settings_store = _settings.Settings()
+        except Exception:                              # noqa: BLE001
+            settings_store = None
+
     configure(source, source_is_real, upc_index,
               Path(static_dir) if static_dir else None,
-              scandex_client=scandex_client)
+              scandex_client=scandex_client,
+              settings_store=settings_store)
 
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     bound = httpd.server_address[1]
