@@ -446,12 +446,25 @@ async function resolveUpc(code){
     }else{
       state.pendingUpc = d.upc;
       $('#out').innerHTML = '';
+
+      // If anything upstream gave us a name we could not match to the
+      // catalog, seed the search with it -- that usually turns an empty
+      // screen into a one-tap answer.
+      const seed = (d.suggest || '').trim();
       $('#teach').innerHTML =
         `<div class="teach">
-           <p>New code <span class="code">${esc(d.upc)}</span>. Pick the title
-              below and it's saved for next time.</p>
+           <p>New code <span class="code">${esc(d.upc)}</span>.
+              ${seed
+                ? `Scanned as <b>${esc(seed)}</b> — confirm the title below.`
+                : `Type the game\'s name in the box above, then tap it in the
+                   results. It\'s saved for next time.`}</p>
+           ${(d.warnings || []).map(w => `<p class="muted">${esc(w)}</p>`).join('')}
          </div>`;
       $('#q').focus();
+      if(seed){
+        $('#q').value = seed;
+        search(seed);
+      }
     }
   }catch(err){ note('Lookup failed: ' + err.message); }
 }
