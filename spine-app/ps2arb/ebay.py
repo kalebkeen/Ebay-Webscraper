@@ -305,25 +305,6 @@ class EbayClient:
             if offset >= total:
                 return
 
-    def active_count(self, query: str, *, category: str | None = CATEGORY_VIDEO_GAMES,
-                     filters: str | None = None) -> int:
-        """Total active listings matching a query, in one call.
-
-        The Browse search response carries a `total` for the whole result set,
-        so a single request with limit=1 gives the count without paging. This
-        is a *supply* proxy for liquidity, not sell-through — a title can have
-        many stale listings that never move. Real velocity needs sold data
-        (Marketplace Insights, or store.py harvesting over time).
-        """
-        base = f"{ENDPOINTS[self.auth.env]['browse']}/item_summary/search"
-        params: dict[str, Any] = {"q": query, "limit": "1", "offset": "0"}
-        if category:
-            params["category_ids"] = category
-        if filters:
-            params["filter"] = filters
-        payload = self._get(base + "?" + urllib.parse.urlencode(params))
-        return int(payload.get("total", 0))
-
     def item_detail(self, item_id: str) -> dict:
         """Full item record, including the description.
 
@@ -343,6 +324,44 @@ class EbayClient:
         return listing
 
     # ----------------------------------------------------- sold (if granted)
+
+    def gtin_lookup(self, barcode: str, *, limit: int = 20) -> list[Listing]:
+        """Active listings for one exact barcode.
+
+        The Browse API accepts `gtin` directly, and it is the best barcode
+        resolver available for this job — better than any general games
+        database — for one reason: **it is variant-accurate**. Black label
+        and Greatest Hits are separate products with separate UPCs, so the
+        listings that come back are for the exact pressing in your hand,
+        not merely the same game. Nothing that resolves a barcode to a
+        title alone can tell you that, and the variant is a 3-5x swing.
+
+        Secondary benefit: the listings carry current asking prices, which
+        is a rough liveness check on the comp. Asking prices are
+        aspirational and must never be fed to the valuation layer as comps
+        — see comps.py — but seeing eight active copies at $12 tells you
+        something a stale database cannot.
+        """
+        digits = "".join(ch for ch in (barcode or "") if ch.isdigit())
+        if len(digits) not in (8, 12, 13, 14):
+            return []
+
+        base = f"{ENDPOINTS[self.auth.env]['browse']}/item_summary/search"
+        params = {"gtin": digits, "limit": str(min(limit, 50))}
+        try:
+            payload = self._get(base + "?" + urllib.parse.urlencode(params))
+        except NotEntitled:
+            raise
+        except EbayError:
+            return []
+
+        out = []
+        for raw in payload.get("itemSummaries") or []:
+            try:
+                out.append(to_listing(raw))
+            except Exception:            # noqa: BLE001 - skip malformed rows
+                continue
+        return out
 
     def sold_search(self, query: str, *, days_back: int = 180,
                     limit: int = 200, category: str | None = CATEGORY_VIDEO_GAMES):
