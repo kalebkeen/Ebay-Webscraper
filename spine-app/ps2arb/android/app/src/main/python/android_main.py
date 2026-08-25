@@ -74,13 +74,26 @@ def start() -> int:
     os.environ.setdefault("PS2ARB_UPC", str(data / "upc_map.json"))
     os.environ.setdefault("PS2ARB_STORE", str(data / "harvest.db"))
     os.environ.setdefault("EBAY_TOKEN_CACHE", str(data / "ebay_token.json"))
+    os.environ.setdefault("SCANDEX_CACHE", str(data / "scandex_cache.json"))
 
     import local_server
+
+    # Optional bulk barcode coverage. With no token this stays None and the
+    # resolver falls back to the local index and manual entry -- the intended
+    # default, not a degraded mode.
+    scandex_client = None
+    try:
+        import scandex
+        candidate = scandex.ScanDexClient()
+        scandex_client = candidate if candidate.configured else None
+    except Exception as exc:          # never block startup on a barcode extra
+        print(f"spine: scandex unavailable ({exc})")
 
     source, is_real = _build_source(data)
     _PORT = local_server.start(
         port=0, source=source, source_is_real=is_real,
-        static_dir=str(_static_dir()))
+        static_dir=str(_static_dir()),
+        scandex_client=scandex_client)
     print(f"spine: serving on 127.0.0.1:{_PORT} (real_source={is_real})")
     return _PORT
 
