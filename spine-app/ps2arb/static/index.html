@@ -197,6 +197,11 @@ input::placeholder{color:var(--dim)}
 .spinner{color:var(--mist);font-family:'IBM Plex Mono',monospace;font-size:12px;
   text-align:center;padding:26px}
 
+.chip.sealed{margin-left:auto}
+.tier{margin-top:7px;font-size:12px;color:var(--dim);line-height:1.4}
+.tier b{color:var(--fg);font-weight:600}
+.tier.warn{color:#ffb4a2}
+
 /* ---- setup / keys ---- */
 .setup{background:var(--panel);border:1px solid var(--line);border-radius:12px;
        padding:12px 14px;margin-bottom:14px}
@@ -295,12 +300,14 @@ input::placeholder{color:var(--dim)}
 </div>
 
 <div class="group">
-  <div class="glab">What's in the case</div>
-  <div class="chips" id="completeness">
-    <button class="chip" data-v="loose" aria-pressed="true">Disc only</button>
-    <button class="chip" data-v="disc_case" aria-pressed="false">+ Case</button>
-    <button class="chip" data-v="cib" aria-pressed="false">+ Manual</button>
+  <div class="glab">What's included</div>
+  <div class="chips" id="included">
+    <button class="chip" data-part="disc"   aria-pressed="true">Disc</button>
+    <button class="chip" data-part="case"   aria-pressed="false">Case</button>
+    <button class="chip" data-part="manual" aria-pressed="false">Manual</button>
+    <button class="chip sealed" data-part="sealed" aria-pressed="false">Sealed</button>
   </div>
+  <div class="tier" id="tierNote"></div>
 </div>
 
 <div class="group">
@@ -338,7 +345,69 @@ function wireChips(id, key, cast){
   });
 }
 wireChips('variant','variant');
-wireChips('completeness','completeness');
+
+/* ---- what's included: components -> pricing tier ---- */
+const parts = {disc:true, case:false, manual:false, sealed:false};
+
+function partBtn(name){
+  return document.querySelector(`#included [data-part="${name}"]`);
+}
+function paintParts(){
+  for(const k in parts) partBtn(k).setAttribute('aria-pressed', String(parts[k]));
+  // Sealed describes the whole item, not a component, so the others are
+  // meaningless alongside it.
+  ['disc','case','manual'].forEach(k=>{
+    partBtn(k).disabled = parts.sealed;
+    partBtn(k).style.opacity = parts.sealed ? .35 : 1;
+  });
+}
+
+/* The enum has four usable tiers, and the checkbox grid can express
+   combinations none of them name. Each mapping below is a deliberate
+   choice, not a default. */
+function deriveTier(){
+  if(parts.sealed) return {v:'sealed', note:
+    `<b>Sealed</b> — a different market with its own grading and resealing
+     fraud. Prices here come from used-disc comps, so this is refused rather
+     than guessed.`, warn:true};
+
+  if(!parts.disc){
+    if(!parts.case && !parts.manual) return {v:null, note:'Select what you have.', warn:true};
+    return {v:'no_disc', note:
+      `<b>No disc</b> — packaging only. Worth a few dollars whatever the game,
+       and there is no comp source for it.`, warn:true};
+  }
+  if(parts.case && parts.manual) return {v:'cib', note:
+    `<b>Complete</b> — disc, case and manual.`};
+  if(parts.case) return {v:'disc_case', note:
+    `<b>Disc + case</b>, no manual. Closer to loose money than to complete:
+     roughly two thirds of the complete premium is the manual.`};
+  if(parts.manual) return {v:'disc_case', note:
+    `<b>Disc + manual</b>, no case. Priced as disc+case — the conservative
+     read. A generic case costs a pound or two, so this is the cheapest
+     upgrade to complete you will find.`};
+  return {v:'loose', note:`<b>Disc only</b>.`};
+}
+
+function applyParts(){
+  paintParts();
+  const t = deriveTier();
+  state.completeness = t.v || 'loose';
+  const el = $('#tierNote');
+  el.innerHTML = t.note;
+  el.className = 'tier' + (t.warn ? ' warn' : '');
+  if(t.v) value(); else $('#out').innerHTML = '';
+}
+
+$('#included').addEventListener('click', e=>{
+  const b = e.target.closest('button'); if(!b || b.disabled) return;
+  const k = b.dataset.part;
+  parts[k] = !parts[k];
+  if(k === 'sealed' && parts.sealed){ parts.disc = parts.case = parts.manual = false; }
+  if(k !== 'sealed' && parts[k]) parts.sealed = false;
+  applyParts();
+});
+applyParts();
 wireChips('pickup','pickup', v=>v==='1');
 
 let askTimer;
