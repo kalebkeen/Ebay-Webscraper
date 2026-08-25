@@ -372,6 +372,15 @@ def tier_price(quotes: dict[Completeness, CompQuote],
         # extrapolate it from used prices.
         return None, "no sealed comp — sealed is not extrapolable from used"
 
+    if want is Completeness.NO_DISC:
+        # Case and/or manual with no game in it. The fallback below would
+        # price this as a LOOSE DISC -- the one component it definitionally
+        # does not have -- returning ~78% of CIB for an empty case. Packaging
+        # sells for a few dollars regardless of how valuable the game is, and
+        # there is no comp source for it, so refuse rather than guess.
+        return None, ("no disc — packaging alone has no usable comp and is "
+                      "worth a few dollars at most")
+
     if loose:
         return loose.price, f"tier {want.value} unavailable, fell back to loose"
     return None, f"no comp for tier {want.value}"
@@ -596,7 +605,13 @@ def value_sku(
             p25=0.0, p75=0.0, n_effective=0.0, confidence=Confidence.NONE,
             monthly_drift=None, sales_per_month=None, active_listings=None,
             est_days_to_sell=None, adjustments=adjustments,
-            warnings=warnings + ["no usable comp data"],
+            # Prefer the SPECIFIC reason the tier refused (sealed is a
+            # different market; packaging alone has no comp) over the generic
+            # message, which reads like a database gap rather than a
+            # deliberate refusal and invites the user to retry forever.
+            warnings=warnings + ([a for a in adjustments
+                                  if "no sealed comp" in a or "no disc —" in a]
+                                 or ["no usable comp data"]),
         )
 
     # --- confidence -------------------------------------------------------
