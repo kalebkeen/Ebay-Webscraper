@@ -100,6 +100,12 @@ def resolve(title: str, description: str = "") -> PricingTarget:
         reasons.append("high repro-risk title — photo verification required")
         verdict = Verdict.REVIEW
 
+    # Bulk Wikipedia titles carry safe-default economics (budget variant, low
+    # liquidity/repro), not researched values. Say so, so a PROCEED on one of
+    # them is read as "plausible" rather than "verified".
+    if entry and not entry.curated:
+        reasons.append("uncurated title — liquidity/repro/reprint are defaults")
+
     return PricingTarget(
         raw_title=title,
         title=entry.canonical if entry else None,

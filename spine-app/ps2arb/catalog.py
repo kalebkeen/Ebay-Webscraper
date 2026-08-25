@@ -1,10 +1,18 @@
 """
 Canonical PS2 catalog + title matcher.
 
-This is a seed of ~30 entries to prove the matching logic. The real catalog
-should be built from Redump (definitive disc dumps, includes serials and
-region) joined against PriceCharting IDs for pricing. Roughly 2,000 NTSC-U
-titles, more like 4,500 across all regions.
+Two tiers:
+  * a hand-researched seed (`_SEED`, ~30 titles) with verified
+    has_greatest_hits / liquidity / repro_risk, and
+  * the full title list from Wikipedia (`catalog_data.BULK`, ~4,200 titles
+    across NA/EU/JP), appended by `_load_bulk()` with *safe defaults* — see
+    that function for why has_greatest_hits defaults to True for these.
+
+`curated` distinguishes the two. A future pass should replace the bulk
+defaults with real data: Redump (definitive disc dumps: serials + region) and
+PriceCharting IDs for pricing and per-title Greatest Hits status. Wikipedia
+gives titles, regions and alternate-name aliases but NOT barcodes/UPCs, disc
+serials, or prices — those still have to come from elsewhere.
 
 The `has_greatest_hits` field is load-bearing: if a title never had a budget
 reprint, an unconfirmed variant is low-risk. If it did, unconfirmed means
@@ -42,12 +50,21 @@ class Title:
     # 'high' = 20+, 'medium' = 5-20, 'low' = 1-5, 'thin' = <1
     liquidity: str = "medium"
     repro_risk: str = "low"   # low | medium | high
+    # Regions the title released in, subset of {"NA", "EU", "JP"}.
+    regions: list[str] = field(default_factory=lambda: ["NA"])
+    # True for the hand-researched seed below; False for bulk Wikipedia imports
+    # whose has_greatest_hits / liquidity / repro_risk are safe defaults, not
+    # verified. Downstream uses this to flag that the economics rest on guesses.
+    curated: bool = False
 
     def search_keys(self) -> list[str]:
         return [self.canonical] + self.aliases
 
 
-CATALOG: list[Title] = [
+# Hand-researched seed. These have verified has_greatest_hits / liquidity /
+# repro_risk; the loop below stamps curated=True on every one. The far larger
+# bulk list from Wikipedia is appended afterwards with safe defaults.
+_SEED: list[Title] = [
     # --- high-value / high repro risk ---
     Title("Rule of Rose", ["rule of the rose"], False, "thin", "high"),
     Title("Haunting Ground", ["demento"], False, "thin", "high"),
@@ -85,6 +102,44 @@ CATALOG: list[Title] = [
     Title("Tony Hawk's Pro Skater 4", ["thps4", "tony hawk 4"], True, "high", "low"),
 ]
 
+for _seed in _SEED:
+    _seed.curated = True
+
+
+def _load_bulk() -> list[Title]:
+    """Append the full Wikipedia-sourced title list.
+
+    Every bulk entry is uncurated, so its economics fields take *safe*
+    defaults rather than the dataclass defaults:
+
+    - has_greatest_hits=True prices an unconfirmed variant as the cheap budget
+      reprint. This is the pessimistic assumption pricing_variant() wants when
+      a title is unresearched: guessing Black Label and being wrong overpays
+      3-5x, so we never do it for a title we haven't checked. (The dataclass
+      default of False would do exactly the wrong thing here.)
+    - liquidity='low' and repro_risk='low' are conservative placeholders until
+      real sold-through data replaces them.
+    """
+    try:
+        import catalog_data
+    except ImportError:
+        return []
+    seen = {strip_noise(k) for t in _SEED for k in t.search_keys()}
+    bulk: list[Title] = []
+    for canonical, regions, aliases in catalog_data.BULK:
+        if strip_noise(canonical) in seen:
+            continue
+        bulk.append(Title(
+            canonical=canonical,
+            aliases=list(aliases),
+            has_greatest_hits=True,
+            liquidity="low",
+            repro_risk="low",
+            regions=list(regions),
+            curated=False,
+        ))
+    return bulk
+
 
 @dataclass
 class MatchResult:
@@ -108,15 +163,44 @@ def strip_noise(text: str) -> str:
     return " ".join(tokens)
 
 
+# Assembled once strip_noise exists (it de-dupes bulk against the seed).
+CATALOG: list[Title] = _SEED + _load_bulk()
+
+
 # Build the lookup once: every alias maps back to its Title.
 _INDEX: dict[str, Title] = {}
 _KEY_NUM: dict[str, int | None] = {}
 for _t in CATALOG:
     for _key in _t.search_keys():
         _clean = strip_noise(_key)
+        if not _clean:
+            # Title made entirely of stopwords (e.g. "Black", "Retro"). It is
+            # unmatchable under the current scheme anyway — a listing for it
+            # also strips to empty — so keep it out of the index rather than
+            # let one such title shadow another under the "" key.
+            continue
         _INDEX[_clean] = _t
         _KEY_NUM[_clean] = sequel.extract(_clean)
 _CHOICES = list(_INDEX.keys())
+
+# Token -> candidate keys, so a query is scored only against catalog entries
+# that share at least one word with it. With a 30-entry seed the full O(N)
+# scan was free; at ~4,200 titles it was ~300 ms/listing, which made the
+# backtest and any feed scan intractable. A candidate that shares no token
+# with the query scores ~0 on token_set_ratio, so blocking on shared tokens
+# cannot drop a real winner; queries that block to nothing fall back to the
+# full scan, preserving fuzzy tolerance for the rare all-typo title.
+_TOKEN_INDEX: dict[str, list[str]] = {}
+for _clean in _CHOICES:
+    for _tok in set(_clean.split()):
+        _TOKEN_INDEX.setdefault(_tok, []).append(_clean)
+
+
+def _candidates(cleaned: str) -> list[str]:
+    cands: set[str] = set()
+    for tok in set(cleaned.split()):
+        cands.update(_TOKEN_INDEX.get(tok, ()))
+    return list(cands) if cands else _CHOICES
 
 
 def match(listing_title: str, threshold: float = 80.0) -> MatchResult:
@@ -132,11 +216,13 @@ def match(listing_title: str, threshold: float = 80.0) -> MatchResult:
 
     q_num = sequel.extract(cleaned)
 
-    # Score everything, then filter on the hard constraint. Filtering after
-    # scoring (rather than using score_cutoff alone) means a wrong-numbered
-    # 100-scorer cannot crowd out the correct 92-scorer.
+    # Score everything (within the token-blocked candidate set), then filter on
+    # the hard constraint. Filtering after scoring (rather than using
+    # score_cutoff alone) means a wrong-numbered 100-scorer cannot crowd out
+    # the correct 92-scorer.
+    choices = _candidates(cleaned)
     scored = fuzzy.extract(
-        cleaned, _CHOICES, scorer=fuzzy.token_set_ratio, limit=len(_CHOICES)
+        cleaned, choices, scorer=fuzzy.token_set_ratio, limit=len(choices)
     )
 
     best: tuple[str, float] | None = None
@@ -178,8 +264,9 @@ def ambiguity_check(listing_title: str, margin: float = 6.0) -> list[tuple[str, 
         seen.add(winner.title.canonical)
 
     rivals: list[tuple[str, float]] = []
+    choices = _candidates(cleaned)
     for key, score, _ in fuzzy.extract(
-        cleaned, _CHOICES, scorer=fuzzy.token_set_ratio, limit=len(_CHOICES)
+        cleaned, choices, scorer=fuzzy.token_set_ratio, limit=len(choices)
     ):
         if score < 70.0:
             break

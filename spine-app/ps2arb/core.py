@@ -114,7 +114,8 @@ def titles(q: str = "", limit: int = 12) -> dict:
 def _row(t) -> dict:
     return {"title": t.canonical, "liquidity": t.liquidity,
             "repro_risk": t.repro_risk,
-            "has_greatest_hits": t.has_greatest_hits}
+            "has_greatest_hits": t.has_greatest_hits,
+            "regions": t.regions, "curated": t.curated}
 
 
 def value(source, source_is_real: bool, *, title: str,
