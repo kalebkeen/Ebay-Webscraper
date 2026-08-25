@@ -128,6 +128,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not res.title:
                     return self._send(200, {
                         "upc": res.barcode, "known": False,
+                        "suggest": res.suggest,
                         "warnings": res.warnings})
 
                 entry = core.entry_for(res.title)
