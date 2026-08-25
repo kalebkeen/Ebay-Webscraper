@@ -237,15 +237,78 @@ class Resolution:
     warnings: list = field(default_factory=list)
 
 
-def resolve(barcode: str, index: upc.UpcIndex,
-            client: ScanDexClient | None = None) -> Resolution:
-    """
-    Local index first, ScanDex second, nothing third.
+def _from_ebay(code: str, ebay_client) -> Resolution | None:
+    """Resolve a barcode through live eBay listings for that exact GTIN.
 
-    The ordering is not arbitrary. A locally learned entry carries a
-    confirmed VARIANT; a ScanDex hit carries only a title. Preferring the
-    remote source because it is "more authoritative" would throw away the
-    more valuable answer.
+    Ranked ABOVE ScanDex because it is the only remote source that knows
+    the PRESSING. Black label and Greatest Hits carry different barcodes,
+    so every listing returned here is for the exact item in your hand, and
+    running those titles through the existing parser recovers the variant
+    and completeness too.
+
+    Consensus across listings rather than trusting the first one: a single
+    seller mislabelling a copy should not decide the variant.
+    """
+    try:
+        listings = ebay_client.gtin_lookup(code, limit=20)
+    except Exception:                    # noqa: BLE001 - never break a scan
+        return None
+    if not listings:
+        return None
+
+    import pipeline
+    from collections import Counter
+    titles, variants = Counter(), Counter()
+    for lst in listings:
+        target = pipeline.resolve(lst.title, getattr(lst, "description", ""))
+        if target.title:
+            titles[target.title] += 1
+            if target.variant.value != "unknown":
+                variants[target.variant.value] += 1
+    if not titles:
+        return None
+
+    title, hits = titles.most_common(1)[0]
+    out = Resolution(barcode=code, title=title, source="ebay")
+    # Agreement across several independent listings is the confidence signal.
+    out.confident = hits >= 3 and hits >= 0.6 * sum(titles.values())
+
+    if variants:
+        variant, vhits = variants.most_common(1)[0]
+        if vhits >= 2 and vhits >= 0.6 * sum(variants.values()):
+            out.variant = variant
+        else:
+            out.warnings.append(
+                "Listings disagree on the variant — check the spine.")
+    else:
+        out.warnings.append(
+            "No listing stated the variant — check the spine before paying.")
+
+    asks = sorted(l.price for l in listings if getattr(l, "price", 0) > 0)
+    if asks:
+        mid = asks[len(asks) // 2]
+        # Asking prices, explicitly labelled as such. They must never reach
+        # the valuation layer as comps -- they are aspirational and routinely
+        # 2-3x what a title actually clears.
+        out.warnings.append(
+            f"{len(asks)} live listings, median ask ${mid:.2f} "
+            f"(asking prices, not sold comps).")
+    return out
+
+
+def resolve(barcode: str, index: upc.UpcIndex,
+            client: ScanDexClient | None = None,
+            ebay_client=None) -> Resolution:
+    """
+    Local index, then eBay GTIN, then ScanDex, then nothing.
+
+    The ordering is not arbitrary and follows one rule: prefer whichever
+    source knows the most about the PRESSING, not the source that sounds
+    most authoritative.
+
+      local    confirmed variant, offline, instant
+      eBay     variant-accurate (GH and black label have different UPCs)
+      ScanDex  title only, variant unknown
     """
     code = upc.normalise(barcode)
     out = Resolution(barcode=code or barcode)
@@ -262,6 +325,11 @@ def resolve(barcode: str, index: upc.UpcIndex,
         if not out.confident:
             out.warnings.append("Seen once before — confirm the title is right.")
         return out
+
+    if ebay_client is not None:
+        found = _from_ebay(code, ebay_client)
+        if found is not None:
+            return found
 
     if client is None or not client.configured:
         return out
