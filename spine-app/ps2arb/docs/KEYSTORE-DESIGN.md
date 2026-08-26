@@ -318,16 +318,23 @@ not in `sync_android.sh`'s MODULES, so it is never bundled into the APK.
    python keystore.py set scandex_token      <token>
    python keystore.py serve                 # runs on 0.0.0.0:8787
    ```
-3. **Auto-start (Windows, at logon)** — run once in PowerShell (adjust paths):
+3. **Auto-start at logon (no admin needed) — a Startup-folder shortcut.** Task
+   Scheduler works but needs elevation; a shortcut in the user's Startup folder
+   does not, and `pythonw.exe` runs the server with no console window:
    ```
-   $py  = "C:\Path\to\python.exe"
-   $dir = "C:\Path\to\spine-app\ps2arb"
-   $act = New-ScheduledTaskAction -Execute $py -Argument "keystore.py serve" -WorkingDirectory $dir
-   $trg = New-ScheduledTaskTrigger -AtLogOn
-   Register-ScheduledTask -TaskName "SpineKeystore" -Action $act -Trigger $trg -Description "Spine keystore"
+   $py = "C:\Python314\pythonw.exe"
+   $lnk = Join-Path ([Environment]::GetFolderPath('Startup')) "SpineKeystore.lnk"
+   $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+   $sc.TargetPath = $py
+   $sc.Arguments = "keystore.py serve"
+   $sc.WorkingDirectory = "C:\Users\<you>\spine\spine-app\ps2arb"
+   $sc.WindowStyle = 7
+   $sc.Save()
    ```
    (Over Tailscale the transport is encrypted, so binding 0.0.0.0 is fine —
-   nothing answers without the bearer token anyway.)
+   nothing answers without the bearer token anyway. If the phone can't reach
+   the desktop, allow inbound TCP 8787 on the Tailscale interface in Windows
+   Firewall.)
 4. **Phone, once:** in the app's "Barcode lookup & API keys" panel, under
    **Key server**, set
    - Keystore URL = `http://desk.tailXXXX.ts.net:8787`
