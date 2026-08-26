@@ -39,12 +39,13 @@ except ImportError:                                    # pragma: no cover
 
 # CLIP embeddings (desktop-only, optional). When present, the photo index
 # matches by angle-robust image embedding instead of the perceptual hash.
-try:
-    import numpy as _np
-    from sentence_transformers import SentenceTransformer
-    _HAVE_CLIP = True
-except ImportError:                                    # pragma: no cover
-    _HAVE_CLIP = False
+# Availability is detected WITHOUT importing torch — that stays lazy so the
+# keystore's key-serving never depends on (or waits for) torch loading, and a
+# torch/CUDA hiccup can never take down key delivery.
+import importlib.util as _ilu
+
+_HAVE_CLIP = (_ilu.find_spec("sentence_transformers") is not None
+             and _ilu.find_spec("numpy") is not None)
 
 _CLIP_MODEL = None                                     # lazy-loaded once
 
@@ -287,6 +288,7 @@ def clip_available() -> bool:
 def _clip():
     global _CLIP_MODEL
     if _CLIP_MODEL is None:
+        from sentence_transformers import SentenceTransformer  # lazy: pulls torch
         _CLIP_MODEL = SentenceTransformer(
             os.environ.get("SPINE_CLIP_MODEL", "clip-ViT-B-32"))
     return _CLIP_MODEL
@@ -391,6 +393,7 @@ def match_photo(image_b64: str, max_distance: int = _MATCH_DISTANCE,
     if _HAVE_CLIP:
         try:
             import json as _json
+            import numpy as _np                          # lazy, like torch
             q = _np.array(_embed(raw), dtype=_np.float32)
             best, best_sim = None, -1.0
             for r in rows:
