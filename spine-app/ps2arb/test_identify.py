@@ -1,0 +1,92 @@
+"""
+test_identify.py — photo identification, with a fake transport so no network
+or API key is touched. Verifies the model's reply is parsed, run through the
+catalog matcher, and degraded to a status (never an exception) on every path.
+"""
+from __future__ import annotations
+
+import json
+
+import identify
+
+CHECKS = []
+def check(name, cond):
+    CHECKS.append((name, bool(cond)))
+
+
+def fake(reply_text=None, *, status=200, stop_reason="end_turn", payload=None):
+    """Build a transport returning a canned Messages-API response."""
+    def _t(method, url, headers, body):
+        if payload is not None:
+            return status, payload
+        return status, {"stop_reason": stop_reason,
+                        "content": [{"type": "text", "text": reply_text or ""}]}
+    return _t
+
+
+def main() -> int:
+    KEY = "sk-test"
+
+    # 1. Clean match: a real catalog title comes back and resolves.
+    r = identify.identify_cover(
+        "Zm9v", api_key=KEY,
+        transport=fake(json.dumps({"title": "Resident Evil 4",
+                                   "variant": "black_label",
+                                   "confidence": "high"})))
+    check("matched status", r.status == "matched")
+    check("resolved to catalog title", r.title == "Resident Evil 4")
+    check("variant carried through", r.variant == "black_label")
+    check("usable flag", r.usable is True)
+
+    # 2. JSON embedded in prose still parses.
+    r = identify.identify_cover(
+        "Zm9v", api_key=KEY,
+        transport=fake('Sure! {"title": "Ico", "variant": "unknown", '
+                       '"confidence": "medium"} hope that helps'))
+    check("embedded json parsed + matched", r.status == "matched" and r.title == "Ico")
+
+    # 3. A title the catalog doesn't confidently know -> unmatched (not matched).
+    r = identify.identify_cover(
+        "Zm9v", api_key=KEY,
+        transport=fake(json.dumps({"title": "Totally Fake Game 9000",
+                                   "variant": "unknown", "confidence": "low"})))
+    check("unmatched status", r.status == "unmatched")
+    check("unmatched keeps raw title", r.raw_title == "Totally Fake Game 9000")
+    check("unmatched has no catalog title", r.title is None)
+
+    # 4. No game in the photo.
+    r = identify.identify_cover(
+        "Zm9v", api_key=KEY,
+        transport=fake(json.dumps({"title": None, "confidence": "low"})))
+    check("no_game status", r.status == "no_game")
+
+    # 5. No API key -> error, no call.
+    r = identify.identify_cover("Zm9v", api_key="",
+                                transport=fake("should not be called"))
+    check("missing key is an error", r.status == "error" and "key" in r.note)
+
+    # 6. Model declined.
+    r = identify.identify_cover("Zm9v", api_key=KEY,
+                                transport=fake(None, stop_reason="refusal",
+                                               payload=None))
+    check("refusal is an error", r.status == "error")
+
+    # 7. HTTP error (e.g. bad key) -> error, key never echoed.
+    r = identify.identify_cover(
+        "Zm9v", api_key=KEY,
+        transport=fake(status=401,
+                       payload={"error": {"message": "invalid x-api-key"}}))
+    check("http error surfaced", r.status == "error" and "401" in r.note)
+    check("key not echoed in note", KEY not in r.note)
+
+    failures = [n for n, ok in CHECKS if not ok]
+    print("-" * 72)
+    for n, ok in CHECKS:
+        print(f"  {'ok ' if ok else 'FAIL'}  {n}")
+    print("-" * 72)
+    print(f"{len(CHECKS) - len(failures)}/{len(CHECKS)} checks passed")
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

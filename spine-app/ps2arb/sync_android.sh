@@ -17,7 +17,7 @@ DEST="android/app/src/main/python"
 # already -- a fix landed in the bundled copy only -- so they are synced
 # like everything else rather than trusted to stay aligned by hand.
 MODULES=(catalog.py catalog_data.py comps.py core.py decide.py ebay.py
-         economics.py fuzzy.py listing_parser.py local_server.py
+         economics.py fuzzy.py identify.py listing_parser.py local_server.py
          mock_sources.py pipeline.py scandex.py sequel.py settings.py
          store.py upc.py)
 

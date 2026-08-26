@@ -367,6 +367,28 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/vault/sync":
                 return self._send(200, sync_vault())
 
+            if route == "/api/identify":
+                import identify
+                img = body.get("image") or ""
+                if img.startswith("data:") and "," in img:
+                    img = img.split(",", 1)[1]        # strip the data: URL prefix
+                media = body.get("media_type") or "image/jpeg"
+                key = _SETTINGS.get("anthropic_api_key") if _SETTINGS else ""
+                model = (_SETTINGS.get("vision_model") if _SETTINGS else "") or None
+                res = identify.identify_cover(img, media, api_key=key, model=model)
+                out = {"status": res.status, "raw_title": res.raw_title,
+                       "title": res.title, "variant": res.variant,
+                       "confidence": res.confidence, "note": res.note,
+                       "match_score": round(res.match_score, 1)}
+                if res.usable:
+                    try:
+                        out["price"] = core.value(
+                            _SOURCE, _SOURCE_IS_REAL, title=res.title,
+                            variant=res.variant)
+                    except core.ApiError as exc:
+                        out["price_error"] = exc.detail
+                return self._send(200, out)
+
             if route == "/api/settings":
                 if _SETTINGS is None:
                     return self._send(503, {"detail": "settings unavailable"})

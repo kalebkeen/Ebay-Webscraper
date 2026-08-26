@@ -253,6 +253,13 @@ input::placeholder{color:var(--dim)}
 </div>
 
 <div class="field">
+  <input type="file" id="photo" accept="image/*" capture="environment" hidden>
+  <button class="btn ghost" id="photoBtn">Identify from a photo</button>
+  <div id="photoState" class="muted"></div>
+  <div id="photoResult"></div>
+</div>
+
+<div class="field">
   <input type="text" id="q" placeholder="or type a title" autocomplete="off"
          enterkeyhint="search">
   <div class="results" id="results"></div>
@@ -544,6 +551,79 @@ loadKeys();
 // Best-effort refresh from the desktop keystore on load; silent if unconfigured.
 syncKeys(true);
 backupData(true);
+
+/* ---- identify from a photo ---- */
+(function(){
+  const btn = $('#photoBtn'), input = $('#photo');
+  const state = $('#photoState'), out = $('#photoResult');
+  if(!btn) return;
+  const esc = s => (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const money = n => (n==null) ? '—' : ('$' + Number(n).toFixed(2));
+
+  btn.addEventListener('click', ()=> input.click());
+  input.addEventListener('change', async ()=>{
+    const file = input.files && input.files[0];
+    if(!file) return;
+    out.innerHTML = ''; state.textContent = 'Reading photo…';
+    try{
+      const b64 = await shrink(file, 1280, 0.8);
+      state.textContent = 'Identifying…';
+      const r = await fetch('/api/identify', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({image: b64, media_type: 'image/jpeg'})});
+      render(await r.json());
+    }catch(e){ state.textContent = 'Could not identify: ' + e.message; }
+    input.value = '';
+  });
+
+  // Downscale in the browser to keep the upload small and the cost down.
+  function shrink(file, maxDim, quality){
+    return new Promise((resolve, reject)=>{
+      const img = new Image(), url = URL.createObjectURL(file);
+      img.onload = ()=>{
+        URL.revokeObjectURL(url);
+        let w = img.width, h = img.height;
+        const s = Math.min(1, maxDim / Math.max(w, h));
+        w = Math.round(w*s); h = Math.round(h*s);
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve(c.toDataURL('image/jpeg', quality).split(',', 2)[1]);
+      };
+      img.onerror = ()=>{ URL.revokeObjectURL(url); reject(new Error('bad image')); };
+      img.src = url;
+    });
+  }
+
+  function render(d){
+    if(d.status === 'error'){ state.textContent = d.note || 'Photo identify is unavailable.'; return; }
+    if(d.status === 'no_game'){ state.textContent = d.note || 'No PS2 game found in that photo.'; return; }
+    if(d.status === 'unmatched'){
+      state.textContent = d.note || ('Read a title but no catalog match.');
+      if(d.raw_title){ $('#q').value = d.raw_title; $('#q').dispatchEvent(new Event('input')); }
+      return;
+    }
+    state.textContent = '';
+    const p = d.price || {};
+    let line = p.quotable ? ('Max bid ' + money(p.max_bid) + ' · resale ~' + money(p.expected_resale)
+                             + (p.days_to_sell ? ' · ~' + Math.round(p.days_to_sell) + 'd to sell' : ''))
+             : (d.price_error || (p.warnings && p.warnings[0]) || 'no price data yet');
+    out.innerHTML =
+      '<div class="card">' +
+      '<div><b>' + esc(d.title) + '</b> <span class="muted">(' + esc(d.confidence) + ' confidence)</span></div>' +
+      (d.variant && d.variant !== 'unknown' ? '<div class="muted">variant: ' + esc(d.variant) + '</div>' : '') +
+      '<div>' + esc(line) + '</div>' +
+      '<div class="muted">Best-guess ID — check the spine before you pay.</div>' +
+      '<div style="margin-top:6px"><button class="btn" id="idOk">Looks right</button> ' +
+      '<button class="btn ghost" id="idNo">Not this game</button></div>' +
+      '</div>';
+    $('#idOk').addEventListener('click', ()=>{
+      $('#q').value = d.title; $('#q').dispatchEvent(new Event('input'));
+      out.innerHTML = ''; state.textContent = 'Confirmed — search it below to lock the details.';
+    });
+    $('#idNo').addEventListener('click', ()=>{ out.innerHTML=''; state.textContent=''; });
+  }
+})();
 
 let qTimer;
 $('#q').addEventListener('input', e=>{
