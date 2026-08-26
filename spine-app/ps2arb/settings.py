@@ -33,10 +33,24 @@ FIELDS = {
     "ebay_client_id":     "EBAY_CLIENT_ID",
     "ebay_client_secret": "EBAY_CLIENT_SECRET",
     "pricecharting_token": "PRICECHARTING_TOKEN",
+    # How the phone reaches the desktop keystore. These are LOCAL config, not
+    # service credentials: the keystore never stores or serves them — they are
+    # how you get to it. keystore_url is e.g. http://desk.tailXXXX.ts.net:8787
+    "keystore_url":       "SPINE_KEYSTORE_URL",
+    "keystore_token":     "SPINE_KEYSTORE_TOKEN",
 }
 
 # Never echoed back to the client in full.
-SECRET_FIELDS = {"scandex_token", "ebay_client_secret", "pricecharting_token"}
+SECRET_FIELDS = {"scandex_token", "ebay_client_secret", "pricecharting_token",
+                 "keystore_token"}
+
+# The durable service credentials the desktop keystore stores and serves. A
+# sync writes only these back into settings, so it can never clobber the
+# keystore_url / keystore_token the phone needs to reach the keystore.
+KEYSTORE_SERVED_FIELDS = {
+    "scandex_token", "ebay_client_id", "ebay_client_secret",
+    "pricecharting_token",
+}
 
 
 class Settings:

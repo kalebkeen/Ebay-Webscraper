@@ -66,6 +66,52 @@ def rebuild_clients() -> None:
             print(f"spine: ebay init failed ({exc})")
 
 
+def sync_from_keystore() -> dict:
+    """Pull current service credentials from the desktop keystore and apply them.
+
+    Best-effort by design: if the keystore is unconfigured, unreachable, or
+    rejects the token, the cached credentials in settings.json are left exactly
+    as they were, so scanning keeps working on the last-synced keys. This is the
+    whole point of the keystore — rotate a key once on the desktop and the phone
+    picks it up here, but being offline in a shop never breaks anything.
+    """
+    import json as _json
+    import urllib.error
+    import urllib.request
+    import settings as _settings
+
+    if _SETTINGS is None:
+        return {"ok": False, "detail": "settings unavailable"}
+    url = (_SETTINGS.get("keystore_url") or "").rstrip("/")
+    token = _SETTINGS.get("keystore_token") or ""
+    if not url or not token:
+        return {"ok": False, "detail": "keystore not configured"}
+
+    req = urllib.request.Request(
+        url + "/v1/keys",
+        headers={"Authorization": "Bearer " + token,
+                 "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=6) as resp:
+            payload = _json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "detail": f"keystore returned {exc.code}"}
+    except Exception as exc:                            # noqa: BLE001
+        return {"ok": False, "detail": f"keystore unreachable: {exc}"}
+
+    keys = payload.get("keys") or {}
+    # Only durable service fields; never let a sync overwrite the local
+    # keystore_url / keystore_token the phone needs to reach the keystore.
+    clean = {k: v for k, v in keys.items()
+             if k in _settings.KEYSTORE_SERVED_FIELDS and v}
+    changed = _SETTINGS.update(clean) if clean else []
+    if changed:
+        rebuild_clients()
+    return {"ok": True, "synced": changed,
+            "scandex_ready": _SETTINGS.scandex_ready,
+            "ebay_ready": _SETTINGS.ebay_ready}
+
+
 def configure(source, source_is_real: bool = False, upc_index=None,
               static_dir: Path | None = None, scandex_client=None,
               settings_store=None) -> None:
@@ -227,6 +273,9 @@ class Handler(BaseHTTPRequestHandler):
                     ask=float(body.get("ask") or 0.0),
                     ship_in=float(body.get("ship_in") or 0.0)))
 
+            if route == "/api/keystore/sync":
+                return self._send(200, sync_from_keystore())
+
             if route == "/api/settings":
                 if _SETTINGS is None:
                     return self._send(503, {"detail": "settings unavailable"})
@@ -295,6 +344,13 @@ def start(port: int = 0, source=None, source_is_real: bool = False,
               Path(static_dir) if static_dir else None,
               scandex_client=scandex_client,
               settings_store=settings_store)
+
+    # Pull the latest keys from the desktop keystore on launch, off the hot
+    # path: best-effort, threaded, never blocks the server from binding (a
+    # blocked start is a blank WebView with nothing to explain it).
+    if settings_store is not None and settings_store.get("keystore_url"):
+        threading.Thread(target=sync_from_keystore, daemon=True,
+                         name="spine-keystore-sync").start()
 
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     bound = httpd.server_address[1]

@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# Runtime state and SECRETS — never commit these
+# (they hold API tokens / login credentials / harvested data)
+**/settings.json
+**/keystore.json
+**/keystore_token.txt
+**/scandex_cache.json
+**/upc_index.json
+**/harvest.db
+**/spine_vault.db
+tools/liquidity_counts.json

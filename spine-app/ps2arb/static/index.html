@@ -288,6 +288,24 @@ input::placeholder{color:var(--dim)}
 
   <button class="btn" id="saveKeys">Save keys</button>
   <div id="keyState" class="muted"></div>
+
+  <hr>
+  <p class="muted">
+    <b>Key server (optional).</b> Point this at your desktop keystore and the
+    app fetches the current keys itself — enter these two once, then never
+    paste a service key on the phone again. Over Tailscale, use
+    http://&lt;desktop&gt;.&lt;tailnet&gt;.ts.net:8787
+  </p>
+  <label class="skey">Keystore URL
+    <input type="text" id="s_ks_url" autocomplete="off" spellcheck="false"
+           inputmode="url">
+  </label>
+  <label class="skey">Keystore token
+    <input type="password" id="s_ks_token" autocomplete="off">
+  </label>
+  <button class="btn" id="saveKeystore">Save server</button>
+  <button class="btn" id="syncKeys">Sync now</button>
+  <div id="syncState" class="muted"></div>
 </details>
 
 <div class="group">
@@ -434,6 +452,9 @@ async function loadKeys(){
                            ['s_scandex','scandex_token']]){
       if(f[key] && f[key].set) $('#'+id).placeholder = 'saved ' + f[key].hint;
     }
+    if(f.keystore_url && f.keystore_url.set) $('#s_ks_url').value = f.keystore_url.hint;
+    if(f.keystore_token && f.keystore_token.set)
+      $('#s_ks_token').placeholder = 'saved ' + f.keystore_token.hint;
     showKeyState(d);
   }catch(e){ /* settings are optional */ }
 }
@@ -468,7 +489,41 @@ $('#saveKeys').addEventListener('click', async ()=>{
     $('#keyState').textContent += ' — saved.';
   }catch(e){ $('#keyState').textContent = 'Could not save: ' + e.message; }
 });
+
+$('#saveKeystore').addEventListener('click', async ()=>{
+  const payload = {};
+  const url = $('#s_ks_url').value.trim();
+  const tok = $('#s_ks_token').value.trim();
+  if(url) payload.keystore_url = url;
+  if(tok) payload.keystore_token = tok;
+  if(!Object.keys(payload).length){ $('#syncState').textContent = 'Enter a URL and token.'; return; }
+  $('#syncState').textContent = 'Saving…';
+  try{
+    const r = await fetch('/api/settings', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    if(!r.ok){ const d = await r.json(); $('#syncState').textContent = d.detail || 'Could not save.'; return; }
+    $('#s_ks_token').value = '';
+    $('#syncState').textContent = 'Saved. Tap “Sync now”.';
+  }catch(e){ $('#syncState').textContent = 'Could not save: ' + e.message; }
+});
+
+async function syncKeys(quiet){
+  if(!quiet) $('#syncState').textContent = 'Syncing…';
+  try{
+    const r = await fetch('/api/keystore/sync', {method:'POST'});
+    const d = await r.json();
+    if(!d.ok){ if(!quiet) $('#syncState').textContent = d.detail || 'Sync failed.'; return; }
+    const n = (d.synced||[]).length;
+    $('#syncState').textContent = n ? ('Synced ' + n + ' key(s) from server.')
+                                    : 'Up to date with server.';
+    loadKeys();
+  }catch(e){ if(!quiet) $('#syncState').textContent = 'Sync failed: ' + e.message; }
+}
+$('#syncKeys').addEventListener('click', ()=>syncKeys(false));
+
 loadKeys();
+// Best-effort refresh from the desktop keystore on load; silent if unconfigured.
+syncKeys(true);
 
 let qTimer;
 $('#q').addEventListener('input', e=>{
