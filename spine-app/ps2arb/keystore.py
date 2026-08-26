@@ -45,6 +45,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import settings as _settings
+import vault as _vault
 
 HERE = Path(__file__).resolve().parent
 STORE_PATH = Path(os.environ.get("SPINE_KEYSTORE_STORE", HERE / "keystore.json"))
@@ -123,7 +124,29 @@ class Handler(BaseHTTPRequestHandler):
             store = _store()
             keys = {f: store.get(f) for f in SERVED if store.get(f)}
             return self._send(200, {"keys": keys})
+        if self.path == "/v1/vault/upc":
+            if not self._authed():
+                return self._send(401, {"detail": "missing or bad bearer token"})
+            return self._send(200, {"entries": _vault.all_upc()})
+        if self.path == "/v1/vault/stats":
+            if not self._authed():
+                return self._send(401, {"detail": "missing or bad bearer token"})
+            return self._send(200, _vault.stats())
         return self._send(404, {"detail": "no such route"})
+
+    def do_POST(self):
+        # POST /v1/vault/upc  body: {"entries":[...]} — back the phone's learned
+        # barcode index up to the vault (merge, never clobber).
+        if self.path != "/v1/vault/upc":
+            return self._send(404, {"detail": "no such route"})
+        if not self._authed():
+            return self._send(401, {"detail": "missing or bad bearer token"})
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            return self._send(400, {"detail": "body must be JSON"})
+        return self._send(200, _vault.merge_upc(body.get("entries") or []))
 
     def do_PUT(self):
         # PUT /v1/keys/<field>  body: {"value": "..."} — set/rotate remotely.

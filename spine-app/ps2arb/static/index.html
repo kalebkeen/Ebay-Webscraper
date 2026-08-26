@@ -306,6 +306,13 @@ input::placeholder{color:var(--dim)}
   <button class="btn" id="saveKeystore">Save server</button>
   <button class="btn" id="syncKeys">Sync now</button>
   <div id="syncState" class="muted"></div>
+
+  <p class="muted">
+    Your confirmed barcodes back up to the key server automatically. Losing or
+    resetting this phone won't lose the spines you've verified.
+  </p>
+  <button class="btn" id="backupData">Back up scans now</button>
+  <div id="backupState" class="muted"></div>
 </details>
 
 <div class="group">
@@ -521,9 +528,22 @@ async function syncKeys(quiet){
 }
 $('#syncKeys').addEventListener('click', ()=>syncKeys(false));
 
+async function backupData(quiet){
+  if(!quiet) $('#backupState').textContent = 'Backing up…';
+  try{
+    const r = await fetch('/api/vault/sync', {method:'POST'});
+    const d = await r.json();
+    if(!d.ok){ if(!quiet) $('#backupState').textContent = d.detail || 'Backup failed.'; return; }
+    $('#backupState').textContent = 'Backed up ' + (d.backed_up||0) +
+      ', restored ' + (d.pulled_into_local||0) + ' (vault has ' + (d.vault_total||0) + ').';
+  }catch(e){ if(!quiet) $('#backupState').textContent = 'Backup failed: ' + e.message; }
+}
+$('#backupData').addEventListener('click', ()=>backupData(false));
+
 loadKeys();
 // Best-effort refresh from the desktop keystore on load; silent if unconfigured.
 syncKeys(true);
+backupData(true);
 
 let qTimer;
 $('#q').addEventListener('input', e=>{

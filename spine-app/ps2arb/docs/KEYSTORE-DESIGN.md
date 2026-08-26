@@ -1,7 +1,9 @@
 # Design — Spine Keystore (and eventual Data Vault)
 
 **Status:** Phase 1 **implemented** (2026-08-25) — reachability = **Tailscale**,
-keystore auto-starts. See §9 for setup steps. Phase 2 (data vault) still design.
+keystore auto-starts (§9). **Phase 2 first slice implemented** (2026-08-25):
+the learned barcode index now backs up to a desktop vault (§4a). Remaining
+Phase 2 (ScanDex cache, catalog snapshot, eBay sold-price harvest) still design.
 **Author:** drafted with Claude, 2026-08-25.
 **Problem it solves:** API keys (ScanDex today; eBay/PriceCharting tomorrow)
 rotate and expire. Right now each new key must be hand-pasted into the phone's
@@ -202,6 +204,29 @@ Same desktop server (or a sibling), backed by a central **`spine_vault.db`**
 
 Phase 2 overlaps heavily with the top project priority (real comp source), so
 it's deliberately staged after Phase 1 rather than bundled in.
+
+### 4a. Phase 2 — first slice implemented (barcode index vault)
+
+Built 2026-08-25, no eBay dependency. Files: `vault.py` (desktop-only stdlib
+SQLite `spine_vault.db`, `merge_upc`/`all_upc`/`stats`), `keystore.py` (adds
+`POST`/`GET /v1/vault/upc` on the same server + bearer token), `upc.py`
+(`merge_two`, `all_entries`, `merge_entries`), `local_server.py`
+(`sync_vault()` + `POST /api/vault/sync` + auto-run on launch after the key
+sync), `static/index.html` ("Back up scans now"), `test_vault.py` (11 checks).
+
+The merge rule (`upc.merge_two`, shared by server and phone) is the crux: a
+user-confirmed variant is never downgraded, `times_scanned` is max'd not
+summed, earliest `first_seen` wins — so push/pull is order-independent and safe
+to run automatically. `vault.py` is desktop-only (not in `sync_android.sh`
+MODULES); the phone talks to it over HTTP, so no sqlite ships in the APK.
+
+Verified end-to-end: phone A confirms a spine → backs up → phone B (a reset
+device) restores it with the variant intact; an unreachable vault leaves the
+local index untouched.
+
+Not yet done in Phase 2: the ScanDex cache and catalog snapshot (easy, same
+pattern), and the store.py sold-price harvest (needs eBay keys — the real
+payoff, deferred with the eBay work).
 
 ---
 

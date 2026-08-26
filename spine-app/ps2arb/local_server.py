@@ -112,6 +112,53 @@ def sync_from_keystore() -> dict:
             "ebay_ready": _SETTINGS.ebay_ready}
 
 
+def sync_vault() -> dict:
+    """Back the learned barcode index up to the desktop vault, and pull the
+    merged set back. Best-effort: unreachable leaves the local index untouched.
+
+    Push then pull, both through the merge rule, so it is safe to run on every
+    launch and converges no matter which side is ahead."""
+    import json as _json
+    import urllib.error
+    import urllib.request
+
+    if _SETTINGS is None or _UPC is None:
+        return {"ok": False, "detail": "vault unavailable"}
+    url = (_SETTINGS.get("keystore_url") or "").rstrip("/")
+    token = _SETTINGS.get("keystore_token") or ""
+    if not url or not token:
+        return {"ok": False, "detail": "keystore not configured"}
+    auth = {"Authorization": "Bearer " + token}
+    try:
+        body = _json.dumps({"entries": _UPC.all_entries()}).encode()
+        push = urllib.request.Request(
+            url + "/v1/vault/upc", data=body,
+            headers={**auth, "Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(push, timeout=8) as resp:
+            pushed = _json.loads(resp.read().decode())
+        pull = urllib.request.Request(url + "/v1/vault/upc",
+                                      headers={**auth, "Accept": "application/json"})
+        with urllib.request.urlopen(pull, timeout=8) as resp:
+            payload = _json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        return {"ok": False, "detail": f"vault returned {exc.code}"}
+    except Exception as exc:                            # noqa: BLE001
+        return {"ok": False, "detail": f"vault unreachable: {exc}"}
+
+    pulled = _UPC.merge_entries(payload.get("entries") or [])
+    return {"ok": True, "backed_up": pushed.get("stored", 0),
+            "pulled_into_local": pulled, "vault_total": pushed.get("total", 0)}
+
+
+def _startup_sync() -> None:
+    """Keys first, then the barcode index — both best-effort, off the hot path."""
+    try:
+        sync_from_keystore()
+        sync_vault()
+    except Exception:                                  # noqa: BLE001
+        pass
+
+
 def configure(source, source_is_real: bool = False, upc_index=None,
               static_dir: Path | None = None, scandex_client=None,
               settings_store=None) -> None:
@@ -276,6 +323,9 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/keystore/sync":
                 return self._send(200, sync_from_keystore())
 
+            if route == "/api/vault/sync":
+                return self._send(200, sync_vault())
+
             if route == "/api/settings":
                 if _SETTINGS is None:
                     return self._send(503, {"detail": "settings unavailable"})
@@ -345,12 +395,12 @@ def start(port: int = 0, source=None, source_is_real: bool = False,
               scandex_client=scandex_client,
               settings_store=settings_store)
 
-    # Pull the latest keys from the desktop keystore on launch, off the hot
-    # path: best-effort, threaded, never blocks the server from binding (a
-    # blocked start is a blank WebView with nothing to explain it).
+    # Pull the latest keys AND back up / restore the barcode index on launch,
+    # off the hot path: best-effort, threaded, never blocks the server from
+    # binding (a blocked start is a blank WebView with nothing to explain it).
     if settings_store is not None and settings_store.get("keystore_url"):
-        threading.Thread(target=sync_from_keystore, daemon=True,
-                         name="spine-keystore-sync").start()
+        threading.Thread(target=_startup_sync, daemon=True,
+                         name="spine-startup-sync").start()
 
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     bound = httpd.server_address[1]
