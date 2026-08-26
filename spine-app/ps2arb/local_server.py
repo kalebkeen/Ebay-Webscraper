@@ -113,41 +113,82 @@ def sync_from_keystore() -> dict:
 
 
 def sync_vault() -> dict:
-    """Back the learned barcode index up to the desktop vault, and pull the
-    merged set back. Best-effort: unreachable leaves the local index untouched.
+    """Back the learned barcode index, the ScanDex cache, and pull the catalog
+    override, from the desktop vault. Best-effort: an unreachable vault leaves
+    everything local untouched.
 
-    Push then pull, both through the merge rule, so it is safe to run on every
-    launch and converges no matter which side is ahead."""
+    Push then pull, both through the merge rules, so it is safe to run on every
+    launch and converges no matter which side is ahead. The catalog is pulled
+    into a local override that catalog.py picks up on the NEXT launch, so title
+    updates arrive without an APK rebuild."""
     import json as _json
     import urllib.error
     import urllib.request
+    from pathlib import Path as _Path
 
-    if _SETTINGS is None or _UPC is None:
+    if _SETTINGS is None:
         return {"ok": False, "detail": "vault unavailable"}
     url = (_SETTINGS.get("keystore_url") or "").rstrip("/")
     token = _SETTINGS.get("keystore_token") or ""
     if not url or not token:
         return {"ok": False, "detail": "keystore not configured"}
     auth = {"Authorization": "Bearer " + token}
-    try:
-        body = _json.dumps({"entries": _UPC.all_entries()}).encode()
-        push = urllib.request.Request(
-            url + "/v1/vault/upc", data=body,
+
+    def _post(path, payload):
+        req = urllib.request.Request(
+            url + path, data=_json.dumps(payload).encode(),
             headers={**auth, "Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(push, timeout=8) as resp:
-            pushed = _json.loads(resp.read().decode())
-        pull = urllib.request.Request(url + "/v1/vault/upc",
-                                      headers={**auth, "Accept": "application/json"})
-        with urllib.request.urlopen(pull, timeout=8) as resp:
-            payload = _json.loads(resp.read().decode())
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return _json.loads(resp.read().decode())
+
+    def _get(path):
+        req = urllib.request.Request(
+            url + path, headers={**auth, "Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            return _json.loads(resp.read().decode())
+
+    out = {"ok": True}
+    try:
+        # Barcode index — the crown jewel. A failure here (unreachable) aborts
+        # the whole sync and reports not-ok.
+        if _UPC is not None:
+            pushed = _post("/v1/vault/upc", {"entries": _UPC.all_entries()})
+            payload = _get("/v1/vault/upc")
+            out["backed_up"] = pushed.get("stored", 0)
+            out["pulled_into_local"] = _UPC.merge_entries(payload.get("entries") or [])
+            out["vault_total"] = pushed.get("total", 0)
+        else:
+            _get("/v1/vault/stats")   # still prove reachability if no index yet
     except urllib.error.HTTPError as exc:
         return {"ok": False, "detail": f"vault returned {exc.code}"}
     except Exception as exc:                            # noqa: BLE001
         return {"ok": False, "detail": f"vault unreachable: {exc}"}
 
-    pulled = _UPC.merge_entries(payload.get("entries") or [])
-    return {"ok": True, "backed_up": pushed.get("stored", 0),
-            "pulled_into_local": pulled, "vault_total": pushed.get("total", 0)}
+    # ScanDex cache — optional; its own failure doesn't fail the whole sync.
+    try:
+        import scandex
+        sc_push = _post("/v1/vault/scandex", {"entries": scandex.cache_entries()})
+        sc_pull = _get("/v1/vault/scandex")
+        out["scandex_backed_up"] = sc_push.get("stored", 0)
+        out["scandex_restored"] = scandex.merge_cache(sc_pull.get("entries") or [])
+    except Exception as exc:                            # noqa: BLE001
+        out["scandex_error"] = str(exc)
+
+    # Catalog override — pulled for the NEXT launch to consume. Same path
+    # catalog.py reads (SPINE_CATALOG_OVERRIDE keeps them in lockstep).
+    try:
+        import os as _os
+        cat = _get("/v1/vault/catalog").get("entries") or []
+        if cat:
+            dest = _os.environ.get(
+                "SPINE_CATALOG_OVERRIDE",
+                str(_Path(__file__).parent / "catalog_override.json"))
+            _Path(dest).write_text(_json.dumps(cat), encoding="utf-8")
+            out["catalog_titles"] = len(cat)
+    except Exception as exc:                            # noqa: BLE001
+        out["catalog_error"] = str(exc)
+
+    return out
 
 
 def _startup_sync() -> None:

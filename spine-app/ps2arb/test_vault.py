@@ -16,12 +16,16 @@ TMP = Path(tempfile.mkdtemp(prefix="spine-vault-"))
 TOKEN = "vault-bearer-xyz"
 os.environ["SPINE_KEYSTORE_STORE"] = str(TMP / "keystore.json")
 os.environ["SPINE_VAULT_DB"] = str(TMP / "vault.db")
+os.environ["SCANDEX_CACHE"] = str(TMP / "scandex_cache.json")
+os.environ["SPINE_CATALOG_OVERRIDE"] = str(TMP / "catalog_override.json")
 
 import keystore        # noqa: E402
 import local_server    # noqa: E402
 import settings        # noqa: E402
 import upc             # noqa: E402
 import vault           # noqa: E402
+import scandex         # noqa: E402
+import catalog         # noqa: E402
 
 CHECKS = []
 def check(name, cond):
@@ -89,6 +93,52 @@ def main() -> int:
           and restored.title == "Gran Turismo 4")
     check("restored variant preserved", restored is not None
           and restored.variant == "greatest_hits")
+
+    # --- ScanDex cache vaulting (matched must not be downgraded by a miss) ---
+    matched = {"barcode": "012345678905", "status": "matched", "fetched": 100,
+               "payload": {"status": "matched", "fetched": 100,
+                           "igdb_metadata": {"name": "X"}}}
+    miss = {"barcode": "012345678905", "status": "absent", "fetched": 200,
+            "payload": {"status": "absent", "fetched": 200}}
+    call("POST", "/v1/vault/scandex", {"entries": [matched]})
+    call("POST", "/v1/vault/scandex", {"entries": [miss]})   # newer, but a miss
+    sx = {e["barcode"]: e for e in call("GET", "/v1/vault/scandex")["entries"]}
+    check("scandex matched not downgraded by newer miss",
+          sx["012345678905"]["status"] == "matched")
+
+    # end-to-end: a local ScanDex cache backs up through sync_vault
+    Path(os.environ["SCANDEX_CACHE"]).write_text(json.dumps({
+        "099887766554": {"status": "matched", "fetched": 300,
+                         "igdb_metadata": {"name": "Y"}}}))
+    r3 = local_server.sync_vault()
+    check("sync backed up scandex", r3.get("scandex_backed_up", 0) >= 1)
+    codes = {e["barcode"] for e in call("GET", "/v1/vault/scandex")["entries"]}
+    check("scandex reached the vault", "099887766554" in codes)
+
+    # --- catalog vaulting + override consumption ---
+    vault.replace_catalog([
+        {"canonical": "Test Title A", "regions": ["NA"], "aliases": ["tta"],
+         "liquidity": "high"},
+        {"canonical": "Test Title B", "regions": ["JP"], "aliases": [],
+         "liquidity": "thin"}])
+    check("vault serves catalog snapshot",
+          len(call("GET", "/v1/vault/catalog")["entries"]) == 2)
+
+    ov = Path(os.environ["SPINE_CATALOG_OVERRIDE"])
+    ov.write_text(json.dumps([{"canonical": "Override Only Game",
+                               "regions": ["NA"], "aliases": [],
+                               "liquidity": "low"}]))
+    src = catalog._bulk_source()
+    check("catalog override consumed",
+          len(src) == 1 and src[0][0] == "Override Only Game")
+    ov.unlink()
+    check("catalog falls back to bundled when no override",
+          len(catalog._bulk_source()) > 1000)
+
+    local_server.sync_vault()   # pulls the vault catalog into the override file
+    written = json.loads(ov.read_text())
+    check("sync wrote catalog override from vault",
+          {d["canonical"] for d in written} == {"Test Title A", "Test Title B"})
 
     # --- best-effort: unreachable leaves local intact ---
     app.set("keystore_url", "http://127.0.0.1:1")

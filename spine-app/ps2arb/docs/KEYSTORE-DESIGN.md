@@ -1,9 +1,10 @@
 # Design — Spine Keystore (and eventual Data Vault)
 
 **Status:** Phase 1 **implemented** (2026-08-25) — reachability = **Tailscale**,
-keystore auto-starts (§9). **Phase 2 first slice implemented** (2026-08-25):
-the learned barcode index now backs up to a desktop vault (§4a). Remaining
-Phase 2 (ScanDex cache, catalog snapshot, eBay sold-price harvest) still design.
+keystore auto-starts (§9). **Phase 2 implemented** (2026-08-25) except the
+eBay-gated harvest: the barcode index, the ScanDex cache, and the catalog all
+vault now (§4a). Only the eBay sold-price harvest remains, deferred with the
+eBay keys.
 **Author:** drafted with Claude, 2026-08-25.
 **Problem it solves:** API keys (ScanDex today; eBay/PriceCharting tomorrow)
 rotate and expire. Right now each new key must be hand-pasted into the phone's
@@ -224,9 +225,20 @@ Verified end-to-end: phone A confirms a spine → backs up → phone B (a reset
 device) restores it with the variant intact; an unreachable vault leaves the
 local index untouched.
 
-Not yet done in Phase 2: the ScanDex cache and catalog snapshot (easy, same
-pattern), and the store.py sold-price harvest (needs eBay keys — the real
-payoff, deferred with the eBay work).
+**ScanDex cache + catalog added 2026-08-25** (same server/token/sync):
+- **ScanDex cache** (`scandex.cache_entries`/`merge_cache`, vault
+  `merge_scandex`/`all_scandex`, `POST`/`GET /v1/vault/scandex`): resolved
+  barcodes survive a phone reset or ScanDex going away. Merge keeps a matched
+  hit over a miss, else the newer fetch.
+- **Catalog** (vault `replace_catalog`/`all_catalog`, `GET /v1/vault/catalog`,
+  snapshotted from `catalog_data.BULK` on keystore startup): the phone pulls it
+  into `catalog_override.json`, which `catalog._bulk_source()` reads on the NEXT
+  launch (fallback-safe to the bundled data). This lets the title list grow
+  without an APK rebuild. `SPINE_CATALOG_OVERRIDE` keeps catalog.py and
+  local_server.py pointed at the same file. `test_vault.py` now 18 checks.
+
+Not yet done in Phase 2: the store.py **sold-price harvest** (needs eBay keys —
+the real payoff, deferred with the eBay work).
 
 ---
 

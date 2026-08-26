@@ -9,6 +9,7 @@ __pycache__/
 **/keystore_token.txt
 **/scandex_cache.json
 **/upc_index.json
+**/catalog_override.json
 **/harvest.db
 **/spine_vault.db
 tools/liquidity_counts.json

@@ -21,12 +21,21 @@ assume budget.
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import fuzzy
 
 import sequel
 from listing_parser import normalize
+
+# A catalog snapshot pulled from the desktop vault, if present. Lets the title
+# list grow without rebuilding the APK; absent/unreadable falls back to the
+# bundled catalog_data. Path is shared with local_server via this env var.
+_OVERRIDE = Path(os.environ.get(
+    "SPINE_CATALOG_OVERRIDE", Path(__file__).parent / "catalog_override.json"))
 
 # Words that appear in nearly every listing and destroy match quality.
 STOPWORDS = {
@@ -106,6 +115,27 @@ for _seed in _SEED:
     _seed.curated = True
 
 
+def _bulk_source():
+    """The bulk title rows to load: the vault override if present and valid,
+    otherwise the bundled catalog_data.BULK. Returns rows as
+    (canonical, regions, aliases, liquidity) tuples, or None if neither exists."""
+    try:
+        if _OVERRIDE.exists():
+            data = json.loads(_OVERRIDE.read_text(encoding="utf-8"))
+            rows = [(d["canonical"], tuple(d.get("regions") or []),
+                     tuple(d.get("aliases") or []), d.get("liquidity") or "low")
+                    for d in data if isinstance(d, dict) and d.get("canonical")]
+            if rows:
+                return rows
+    except Exception:                                  # noqa: BLE001
+        pass  # any problem with the override -> fall back to the bundled data
+    try:
+        import catalog_data
+        return catalog_data.BULK
+    except ImportError:
+        return None
+
+
 def _load_bulk() -> list[Title]:
     """Append the full Wikipedia-sourced title list.
 
@@ -122,13 +152,12 @@ def _load_bulk() -> list[Title]:
       eBay data later; see tools/refine_liquidity.py. repro_risk='low' stays a
       placeholder.
     """
-    try:
-        import catalog_data
-    except ImportError:
+    rows = _bulk_source()
+    if rows is None:
         return []
     seen = {strip_noise(k) for t in _SEED for k in t.search_keys()}
     bulk: list[Title] = []
-    for row in catalog_data.BULK:
+    for row in rows:
         canonical, regions, aliases = row[0], row[1], row[2]
         liquidity = row[3] if len(row) > 3 else "low"
         if strip_noise(canonical) in seen:

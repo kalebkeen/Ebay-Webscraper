@@ -220,6 +220,68 @@ class ScanDexClient:
 
 
 # ---------------------------------------------------------------------------
+# Vault backup helpers — read/merge the cache file directly so they work even
+# when the client isn't configured (the cache is worth keeping regardless).
+# ---------------------------------------------------------------------------
+
+def cache_entries(path: Path | None = None) -> list[dict]:
+    """Every cached lookup as {barcode, payload, status, fetched}."""
+    p = Path(path or CACHE_PATH)
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+    out = []
+    for code, payload in data.items():
+        if not isinstance(payload, dict):
+            continue
+        out.append({"barcode": code, "payload": payload,
+                    "status": payload.get("status", "unknown"),
+                    "fetched": payload.get("fetched", 0)})
+    return out
+
+
+def _cache_better(a: dict, b: dict) -> bool:
+    sa = 1 if a.get("status") == "matched" else 0
+    sb = 1 if b.get("status") == "matched" else 0
+    if sa != sb:
+        return sa > sb
+    return float(a.get("fetched") or 0) > float(b.get("fetched") or 0)
+
+
+def merge_cache(entries: list[dict], path: Path | None = None) -> int:
+    """Merge vault rows into the local cache file. A matched hit is never
+    replaced by a miss; otherwise the newer fetch wins. Returns rows changed."""
+    p = Path(path or CACHE_PATH)
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    changed = 0
+    for e in entries or []:
+        code = str(e.get("barcode", "")).strip()
+        payload = e.get("payload")
+        if not code or not isinstance(payload, dict):
+            continue
+        incoming = {"status": e.get("status") or payload.get("status", ""),
+                    "fetched": e.get("fetched") or payload.get("fetched", 0)}
+        cur = data.get(code)
+        cur_meta = ({"status": cur.get("status", ""),
+                     "fetched": cur.get("fetched", 0)}
+                    if isinstance(cur, dict) else None)
+        if cur_meta is None or _cache_better(incoming, cur_meta):
+            data[code] = payload
+            changed += 1
+    if changed:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(data, indent=1))
+        except OSError:
+            pass
+    return changed
+
+
+# ---------------------------------------------------------------------------
 # The layered resolver
 # ---------------------------------------------------------------------------
 

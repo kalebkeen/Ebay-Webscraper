@@ -124,20 +124,25 @@ class Handler(BaseHTTPRequestHandler):
             store = _store()
             keys = {f: store.get(f) for f in SERVED if store.get(f)}
             return self._send(200, {"keys": keys})
-        if self.path == "/v1/vault/upc":
+        vault_gets = {
+            "/v1/vault/upc": lambda: {"entries": _vault.all_upc()},
+            "/v1/vault/scandex": lambda: {"entries": _vault.all_scandex()},
+            "/v1/vault/catalog": lambda: {"entries": _vault.all_catalog()},
+            "/v1/vault/stats": _vault.stats,
+        }
+        if self.path in vault_gets:
             if not self._authed():
                 return self._send(401, {"detail": "missing or bad bearer token"})
-            return self._send(200, {"entries": _vault.all_upc()})
-        if self.path == "/v1/vault/stats":
-            if not self._authed():
-                return self._send(401, {"detail": "missing or bad bearer token"})
-            return self._send(200, _vault.stats())
+            return self._send(200, vault_gets[self.path]())
         return self._send(404, {"detail": "no such route"})
 
     def do_POST(self):
-        # POST /v1/vault/upc  body: {"entries":[...]} — back the phone's learned
-        # barcode index up to the vault (merge, never clobber).
-        if self.path != "/v1/vault/upc":
+        # Back the phone's data up to the vault (merge, never clobber).
+        posters = {
+            "/v1/vault/upc": _vault.merge_upc,
+            "/v1/vault/scandex": _vault.merge_scandex,
+        }
+        if self.path not in posters:
             return self._send(404, {"detail": "no such route"})
         if not self._authed():
             return self._send(401, {"detail": "missing or bad bearer token"})
@@ -146,7 +151,7 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
             return self._send(400, {"detail": "body must be JSON"})
-        return self._send(200, _vault.merge_upc(body.get("entries") or []))
+        return self._send(200, posters[self.path](body.get("entries") or []))
 
     def do_PUT(self):
         # PUT /v1/keys/<field>  body: {"value": "..."} — set/rotate remotely.
@@ -174,6 +179,19 @@ def serve(host: str | None = None, port: int | None = None) -> None:
         sys.exit("No keystore token. Run:  python keystore.py init")
     host = host or os.environ.get("KEYSTORE_HOST", "0.0.0.0")
     port = int(port or os.environ.get("KEYSTORE_PORT", "8787"))
+
+    # Snapshot this desktop's bulk catalog into the vault so phones can pull
+    # title-list updates without a rebuild. Cheap and idempotent (full replace).
+    try:
+        import catalog_data
+        res = _vault.replace_catalog([
+            {"canonical": r[0], "regions": list(r[1]), "aliases": list(r[2]),
+             "liquidity": r[3] if len(r) > 3 else "low"}
+            for r in catalog_data.BULK])
+        print(f"  catalog snapshot -> vault: {res.get('stored', 0)} titles")
+    except Exception as exc:                            # noqa: BLE001
+        print(f"  (catalog snapshot skipped: {exc})")
+
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.token = token                               # type: ignore[attr-defined]
     shown = _store()
