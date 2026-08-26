@@ -3,15 +3,18 @@ package com.spine.ps2
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Bundle
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.PermissionRequest
+import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.JavascriptInterface
 import android.webkit.WebViewClient
 import android.widget.TextView
+import androidx.activity.result.contract.ActivityResultContracts
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import com.google.mlkit.vision.barcode.common.Barcode
@@ -43,6 +46,21 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var status: TextView
     private var port: Int = 0
+
+    // Pending <input type="file"> callback + the picker launcher. Registered as
+    // a field so it is ready before the activity starts. Storage Access
+    // Framework grants access to the picked file, so no media permission is
+    // needed for gallery selection.
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private val fileChooserLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val uris = WebChromeClient.FileChooserParams.parseResult(
+            result.resultCode, result.data
+        )
+        filePathCallback?.onReceiveValue(uris)
+        filePathCallback = null
+    }
 
     companion object {
         private const val TAG = "Spine"
@@ -199,6 +217,27 @@ class MainActivity : AppCompatActivity() {
                 ): Boolean {
                     Log.d(TAG, "console: ${msg?.message()} @${msg?.lineNumber()}")
                     return true
+                }
+
+                // Makes <input type="file"> work — the photo-identify buttons.
+                // createIntent() honours accept="image/*"; with no `capture`
+                // attribute the system chooser offers camera AND gallery.
+                override fun onShowFileChooser(
+                    view: WebView?,
+                    callback: ValueCallback<Array<Uri>>?,
+                    params: FileChooserParams?
+                ): Boolean {
+                    val intent = params?.createIntent() ?: return false
+                    filePathCallback?.onReceiveValue(null)   // cancel a stale one
+                    filePathCallback = callback
+                    return try {
+                        fileChooserLauncher.launch(intent)
+                        true
+                    } catch (e: Exception) {
+                        Log.e(TAG, "file chooser failed", e)
+                        filePathCallback = null
+                        false
+                    }
                 }
             }
         }
