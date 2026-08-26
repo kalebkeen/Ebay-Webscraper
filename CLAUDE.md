@@ -57,7 +57,9 @@ anything that doesn't move toward real prices.
   (CI builds the APK). Document back-end changes in `docs/KEYSTORE-DESIGN.md`.
 - Desktop deploy after a push: `git -C C:\Users\kaleb\spine pull`, stop the
   running keystore python (CommandLine matches `keystore.py`), relaunch the
-  3.12 `pythonw` — or reboot (the Startup shortcut points at 3.12).
+  3.12 `pythonw` with **`keystore.py serve --open`** — or reboot (the Startup
+  shortcut already runs 3.12 + `--open`). `--open` = Tailscale-only, token-free
+  for tailnet/loopback IPs; omit it and the phone (which syncs token-free) 401s.
 
 ## Module map (`spine-app/ps2arb/`)
 - **Identify:** `listing_parser`, `catalog` (+`catalog_data`), `fuzzy`,
