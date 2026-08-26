@@ -301,15 +301,16 @@ input::placeholder{color:var(--dim)}
   <hr>
   <p class="muted">
     <b>Key server (optional).</b> Point this at your desktop keystore and the
-    app fetches the current keys itself — enter these two once, then never
-    paste a service key on the phone again. Over Tailscale, use
+    app fetches the current keys itself — never paste a service key on the phone
+    again. Over Tailscale just the URL is needed (Tailscale is the auth); the
+    token is only for non-Tailscale access. URL looks like
     http://&lt;desktop&gt;.&lt;tailnet&gt;.ts.net:8787
   </p>
   <label class="skey">Keystore URL
     <input type="text" id="s_ks_url" autocomplete="off" spellcheck="false"
            inputmode="url">
   </label>
-  <label class="skey">Keystore token
+  <label class="skey">Keystore token <span class="muted">(optional over Tailscale)</span>
     <input type="password" id="s_ks_token" autocomplete="off">
   </label>
   <button class="btn" id="saveKeystore">Save server</button>
@@ -512,7 +513,7 @@ $('#saveKeystore').addEventListener('click', async ()=>{
   const tok = $('#s_ks_token').value.trim();
   if(url) payload.keystore_url = url;
   if(tok) payload.keystore_token = tok;
-  if(!Object.keys(payload).length){ $('#syncState').textContent = 'Enter a URL and token.'; return; }
+  if(!Object.keys(payload).length){ $('#syncState').textContent = 'Enter at least a URL.'; return; }
   $('#syncState').textContent = 'Saving…';
   try{
     const r = await fetch('/api/settings', {method:'POST',

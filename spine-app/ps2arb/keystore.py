@@ -37,6 +37,7 @@ ENV OVERRIDES
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -51,6 +52,21 @@ HERE = Path(__file__).resolve().parent
 STORE_PATH = Path(os.environ.get("SPINE_KEYSTORE_STORE", HERE / "keystore.json"))
 TOKEN_PATH = HERE / "keystore_token.txt"
 VERSION = "1.0"
+
+# Tailscale address ranges. In "open" mode the keystore serves token-free but
+# ONLY to clients whose source IP is on the tailnet (or loopback) — so it is
+# never exposed to the LAN even though it binds all interfaces. Tailscale itself
+# is the auth layer: only your own devices can reach these addresses.
+_TAILNET = [ipaddress.ip_network("100.64.0.0/10"),        # CGNAT (Tailscale v4)
+            ipaddress.ip_network("fd7a:115c:a1e0::/48")]  # Tailscale ULA (v6)
+
+
+def _is_trusted_client(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return ip.is_loopback or any(ip in net for net in _TAILNET)
 
 # The keystore holds and serves only durable service credentials — never the
 # phone's keystore_url / keystore_token, which are how the phone reaches it.
@@ -106,13 +122,18 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _authed(self) -> bool:
-        want = self.server.token                      # type: ignore[attr-defined]
-        if not want:
-            return False
+        # A valid bearer token always works (defense in depth, other devices).
+        want = getattr(self.server, "token", "")       # type: ignore[attr-defined]
         header = self.headers.get("Authorization", "")
         prefix = "Bearer "
         got = header[len(prefix):] if header.startswith(prefix) else header
-        return hmac.compare_digest(got, want)
+        if want and hmac.compare_digest(got, want):
+            return True
+        # Open mode: token-free, but only for tailnet/loopback source IPs.
+        if getattr(self.server, "open_mode", False) \
+                and _is_trusted_client(self.client_address[0]):
+            return True
+        return False
 
     def do_GET(self):
         if self.path == "/v1/health":
@@ -183,9 +204,11 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host: str | None = None, port: int | None = None) -> None:
+    open_mode = os.environ.get("SPINE_KEYSTORE_OPEN") == "1"
     token = load_token()
-    if not token:
-        sys.exit("No keystore token. Run:  python keystore.py init")
+    if not token and not open_mode:
+        sys.exit("No keystore token. Run:  python keystore.py init  "
+                 "(or 'serve --open' for token-free Tailscale-only access)")
     host = host or os.environ.get("KEYSTORE_HOST", "0.0.0.0")
     port = int(port or os.environ.get("KEYSTORE_PORT", "8787"))
 
@@ -203,12 +226,16 @@ def serve(host: str | None = None, port: int | None = None) -> None:
 
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.token = token                               # type: ignore[attr-defined]
+    httpd.open_mode = open_mode                       # type: ignore[attr-defined]
     shown = _store()
     have = [f for f in SERVED if shown.get(f)]
+    auth = ("Tailscale/loopback source IPs — token-free (open mode)"
+            if open_mode else "bearer token required")
     print(f"spine-keystore {VERSION} on http://{host}:{port}  "
           f"(serving {len(have)} credential(s): {', '.join(have) or 'none yet'})")
+    print(f"  auth: {auth}")
     print("reach it from the phone at http://<this-desktop>.<tailnet>.ts.net:"
-          f"{port}  — token from keystore_token.txt")
+          f"{port}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -233,6 +260,8 @@ def _cli(argv: list[str]) -> int:
         return 0
 
     if cmd == "serve":
+        if "--open" in rest:
+            os.environ["SPINE_KEYSTORE_OPEN"] = "1"
         serve()
         return 0
 

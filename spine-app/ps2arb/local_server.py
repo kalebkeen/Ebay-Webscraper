@@ -84,13 +84,13 @@ def sync_from_keystore() -> dict:
         return {"ok": False, "detail": "settings unavailable"}
     url = (_SETTINGS.get("keystore_url") or "").rstrip("/")
     token = _SETTINGS.get("keystore_token") or ""
-    if not url or not token:
+    if not url:                                        # token optional (Tailscale)
         return {"ok": False, "detail": "keystore not configured"}
 
-    req = urllib.request.Request(
-        url + "/v1/keys",
-        headers={"Authorization": "Bearer " + token,
-                 "Accept": "application/json"})
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url + "/v1/keys", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=6) as resp:
             payload = _json.loads(resp.read().decode())
@@ -130,9 +130,9 @@ def sync_vault() -> dict:
         return {"ok": False, "detail": "vault unavailable"}
     url = (_SETTINGS.get("keystore_url") or "").rstrip("/")
     token = _SETTINGS.get("keystore_token") or ""
-    if not url or not token:
+    if not url:                                        # token optional (Tailscale)
         return {"ok": False, "detail": "keystore not configured"}
-    auth = {"Authorization": "Bearer " + token}
+    auth = {"Authorization": "Bearer " + token} if token else {}
 
     def _post(path, payload):
         req = urllib.request.Request(
@@ -200,10 +200,12 @@ def _vault_call(method: str, path: str, payload=None, timeout: float = 12.0):
         return None
     url = (_SETTINGS.get("keystore_url") or "").rstrip("/")
     token = _SETTINGS.get("keystore_token") or ""
-    if not url or not token:
+    if not url:                                        # token optional (Tailscale)
         return None
     data = _json.dumps(payload).encode() if payload is not None else None
-    headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
     if data is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url + path, data=data, method=method,

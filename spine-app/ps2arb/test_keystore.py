@@ -99,6 +99,32 @@ def main() -> int:
 
     httpd.shutdown()
 
+    # --- open mode: token-free, but only for tailnet/loopback source IPs ---
+    check("trusted: tailnet v4", keystore._is_trusted_client("100.100.5.5"))
+    check("trusted: loopback", keystore._is_trusted_client("127.0.0.1"))
+    check("trusted: tailnet v6", keystore._is_trusted_client("fd7a:115c:a1e0::9"))
+    check("untrusted: LAN", not keystore._is_trusted_client("192.168.1.10"))
+    check("untrusted: public", not keystore._is_trusted_client("8.8.8.8"))
+
+    oh = ThreadingHTTPServer(("127.0.0.1", 0), keystore.Handler)
+    oh.token = ""
+    oh.open_mode = True
+    threading.Thread(target=oh.serve_forever, daemon=True).start()
+    obase = f"http://127.0.0.1:{oh.server_address[1]}"
+    st, body = _get(obase + "/v1/keys")            # no token, loopback client
+    check("open mode serves loopback without a token",
+          st == 200 and "keys" in body)
+    oh.shutdown()
+
+    # closed mode (default) still refuses a tokenless request
+    ch = ThreadingHTTPServer(("127.0.0.1", 0), keystore.Handler)
+    ch.token = TOKEN
+    ch.open_mode = False
+    threading.Thread(target=ch.serve_forever, daemon=True).start()
+    st, _ = _get(f"http://127.0.0.1:{ch.server_address[1]}/v1/keys")
+    check("closed mode still 401s without a token", st == 401)
+    ch.shutdown()
+
     failures = [n for n, ok in CHECKS if not ok]
     print("-" * 72)
     for n, ok in CHECKS:
