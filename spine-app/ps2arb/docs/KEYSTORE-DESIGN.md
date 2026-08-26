@@ -237,6 +237,18 @@ local index untouched.
   without an APK rebuild. `SPINE_CATALOG_OVERRIDE` keeps catalog.py and
   local_server.py pointed at the same file. `test_vault.py` now 18 checks.
 
+**Photo index added 2026-08-26** (the visual analog of the barcode learned
+index, feeding photo identification): the vault stores confirmed cover/spine
+photos with a perceptual hash (`vault.add_photo`/`match_photo`, tables
+`photo_index` + files under `vault_photos/`; routes `POST /v1/vault/photo` and
+`POST /v1/vault/photo/match`). `/api/identify` checks it **first** — a repeat
+cover resolves free and instant, no vision-API call — and stores each confirmed
+photo so the library grows and Gemini gets called less over time. dHash is
+deliberately light (**Pillow, desktop-only** — guarded so the keystore still
+runs without it; never enters the APK); a CLIP-embedding backend can replace
+`_signature`/`_dhash` later for cross-angle robustness. Captured photos + labels
+are also the dataset for any future embedding index or fine-tune.
+
 Not yet done in Phase 2: the store.py **sold-price harvest** (needs eBay keys —
 the real payoff, deferred with the eBay work).
 

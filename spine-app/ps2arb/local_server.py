@@ -191,6 +191,30 @@ def sync_vault() -> dict:
     return out
 
 
+def _vault_call(method: str, path: str, payload=None, timeout: float = 12.0):
+    """Authed request to the desktop vault (keystore). Returns parsed JSON, or
+    None if the keystore isn't configured or is unreachable — callers fall back."""
+    import json as _json
+    import urllib.request
+    if _SETTINGS is None:
+        return None
+    url = (_SETTINGS.get("keystore_url") or "").rstrip("/")
+    token = _SETTINGS.get("keystore_token") or ""
+    if not url or not token:
+        return None
+    data = _json.dumps(payload).encode() if payload is not None else None
+    headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url + path, data=data, method=method,
+                                 headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return _json.loads(resp.read().decode())
+    except Exception:                                  # noqa: BLE001
+        return None
+
+
 def _startup_sync() -> None:
     """Keys first, then the barcode index — both best-effort, off the hot path."""
     try:
@@ -373,6 +397,29 @@ class Handler(BaseHTTPRequestHandler):
                 if img.startswith("data:") and "," in img:
                     img = img.split(",", 1)[1]        # strip the data: URL prefix
                 media = body.get("media_type") or "image/jpeg"
+
+                def _priced(out, title, variant):
+                    try:
+                        out["price"] = core.value(_SOURCE, _SOURCE_IS_REAL,
+                                                  title=title, variant=variant)
+                    except core.ApiError as exc:
+                        out["price_error"] = exc.detail
+                    return out
+
+                # 1. Your own photo library first — free and instant on a
+                # repeat cover, no vision-API call at all.
+                vm = _vault_call("POST", "/v1/vault/photo/match", {"image": img})
+                if vm and vm.get("matched"):
+                    hit = vm["matched"]
+                    title = hit.get("title")
+                    return self._send(200, _priced({
+                        "status": "matched", "title": title, "raw_title": title,
+                        "variant": hit.get("variant") or "unknown",
+                        "confidence": "high", "source": "photo-index",
+                        "note": "recognized from your photo library"},
+                        title, hit.get("variant") or "unknown"))
+
+                # 2. Fall back to the vision model.
                 s = _SETTINGS
                 provider = (s.get("vision_provider") if s else "") or None
                 key = (s.get("vision_api_key") if s else "") \
@@ -385,15 +432,27 @@ class Handler(BaseHTTPRequestHandler):
                 out = {"status": res.status, "raw_title": res.raw_title,
                        "title": res.title, "variant": res.variant,
                        "confidence": res.confidence, "note": res.note,
-                       "match_score": round(res.match_score, 1)}
+                       "match_score": round(res.match_score, 1),
+                       "source": "vision"}
                 if res.usable:
-                    try:
-                        out["price"] = core.value(
-                            _SOURCE, _SOURCE_IS_REAL, title=res.title,
-                            variant=res.variant)
-                    except core.ApiError as exc:
-                        out["price_error"] = exc.detail
+                    _priced(out, res.title, res.variant)
                 return self._send(200, out)
+
+            if route == "/api/identify/remember":
+                # Store a confirmed photo + label to the desktop dataset so the
+                # photo index grows and future scans of it are free.
+                img = body.get("image") or ""
+                if img.startswith("data:") and "," in img:
+                    img = img.split(",", 1)[1]
+                title = body.get("title") or ""
+                if not img or not title:
+                    return self._send(400, {"detail": "image and title required"})
+                r = _vault_call("POST", "/v1/vault/photo", {
+                    "image": img, "title": title,
+                    "variant": body.get("variant") or "unknown",
+                    "barcode": body.get("barcode") or ""})
+                return self._send(200, r or {"ok": False,
+                                             "detail": "vault unreachable"})
 
             if route == "/api/settings":
                 if _SETTINGS is None:

@@ -137,13 +137,6 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"detail": "no such route"})
 
     def do_POST(self):
-        # Back the phone's data up to the vault (merge, never clobber).
-        posters = {
-            "/v1/vault/upc": _vault.merge_upc,
-            "/v1/vault/scandex": _vault.merge_scandex,
-        }
-        if self.path not in posters:
-            return self._send(404, {"detail": "no such route"})
         if not self._authed():
             return self._send(401, {"detail": "missing or bad bearer token"})
         try:
@@ -151,7 +144,23 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
         except (ValueError, json.JSONDecodeError):
             return self._send(400, {"detail": "body must be JSON"})
-        return self._send(200, posters[self.path](body.get("entries") or []))
+
+        # Merge endpoints back the phone's data up to the vault.
+        posters = {
+            "/v1/vault/upc": _vault.merge_upc,
+            "/v1/vault/scandex": _vault.merge_scandex,
+        }
+        if self.path in posters:
+            return self._send(200, posters[self.path](body.get("entries") or []))
+
+        # Photo index: match a query photo, or store a confirmed one.
+        if self.path == "/v1/vault/photo/match":
+            return self._send(200, _vault.match_photo(body.get("image") or ""))
+        if self.path == "/v1/vault/photo":
+            return self._send(200, _vault.add_photo(
+                body.get("image") or "", body.get("title") or "",
+                body.get("variant") or "unknown", body.get("barcode") or ""))
+        return self._send(404, {"detail": "no such route"})
 
     def do_PUT(self):
         # PUT /v1/keys/<field>  body: {"value": "..."} — set/rotate remotely.

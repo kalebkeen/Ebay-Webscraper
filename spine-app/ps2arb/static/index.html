@@ -559,6 +559,7 @@ backupData(true);
   if(!btn) return;
   const esc = s => (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
   const money = n => (n==null) ? '—' : ('$' + Number(n).toFixed(2));
+  let lastImage = '';
 
   btn.addEventListener('click', ()=> input.click());
   input.addEventListener('change', async ()=>{
@@ -567,6 +568,7 @@ backupData(true);
     out.innerHTML = ''; state.textContent = 'Reading photo…';
     try{
       const b64 = await shrink(file, 1280, 0.8);
+      lastImage = b64;
       state.textContent = 'Identifying…';
       const r = await fetch('/api/identify', {method:'POST',
         headers:{'Content-Type':'application/json'},
@@ -608,9 +610,10 @@ backupData(true);
     let line = p.quotable ? ('Max bid ' + money(p.max_bid) + ' · resale ~' + money(p.expected_resale)
                              + (p.days_to_sell ? ' · ~' + Math.round(p.days_to_sell) + 'd to sell' : ''))
              : (d.price_error || (p.warnings && p.warnings[0]) || 'no price data yet');
+    const src = d.source === 'photo-index' ? ' · from your library' : '';
     out.innerHTML =
       '<div class="card">' +
-      '<div><b>' + esc(d.title) + '</b> <span class="muted">(' + esc(d.confidence) + ' confidence)</span></div>' +
+      '<div><b>' + esc(d.title) + '</b> <span class="muted">(' + esc(d.confidence) + ' confidence' + src + ')</span></div>' +
       (d.variant && d.variant !== 'unknown' ? '<div class="muted">variant: ' + esc(d.variant) + '</div>' : '') +
       '<div>' + esc(line) + '</div>' +
       '<div class="muted">Best-guess ID — check the spine before you pay.</div>' +
@@ -618,8 +621,12 @@ backupData(true);
       '<button class="btn ghost" id="idNo">Not this game</button></div>' +
       '</div>';
     $('#idOk').addEventListener('click', ()=>{
+      // Grow the photo library so this cover is free next time.
+      if(lastImage) fetch('/api/identify/remember', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({image:lastImage, title:d.title, variant:d.variant})}).catch(()=>{});
       $('#q').value = d.title; $('#q').dispatchEvent(new Event('input'));
-      out.innerHTML = ''; state.textContent = 'Confirmed — search it below to lock the details.';
+      out.innerHTML = ''; state.textContent = 'Confirmed — saved to your library.';
     });
     $('#idNo').addEventListener('click', ()=>{ out.innerHTML=''; state.textContent=''; });
   }
