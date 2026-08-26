@@ -79,6 +79,26 @@ def main() -> int:
     check("http error surfaced", r.status == "error" and "401" in r.note)
     check("key not echoed in note", KEY not in r.note)
 
+    # 8. Gemini / OpenAI-compatible path (different response shape) parses too.
+    def fake_openai(text=None, *, status=200, payload=None):
+        def _t(method, url, headers, body):
+            if payload is not None:
+                return status, payload
+            return status, {"choices": [{"message": {"content": text or ""}}]}
+        return _t
+
+    r = identify.identify_cover(
+        "Zm9v", provider="gemini", api_key=KEY,
+        transport=fake_openai(json.dumps({"title": "God of War II",
+                                          "variant": "unknown",
+                                          "confidence": "high"})))
+    check("gemini path matched", r.status == "matched" and r.title == "God of War II")
+    r = identify.identify_cover(
+        "Zm9v", provider="gemini", api_key=KEY,
+        transport=fake_openai(status=429,
+                              payload={"error": {"message": "rate limited"}}))
+    check("gemini http error surfaced", r.status == "error" and "429" in r.note)
+
     failures = [n for n, ok in CHECKS if not ok]
     print("-" * 72)
     for n, ok in CHECKS:

@@ -12,8 +12,10 @@ Standard library only (no SDK), like ebay.py and scandex.py, so it stays
 Chaquopy-safe inside the APK. Credentials come from settings/env; the desktop
 keystore serves the key so it is never pasted on the phone.
 
-    ANTHROPIC_API_KEY   the vision API key (a secret)
-    VISION_MODEL        model id, default claude-opus-5
+    VISION_PROVIDER   anthropic (default) | gemini | openai
+    VISION_API_KEY    the key (a secret; falls back to ANTHROPIC_API_KEY)
+    VISION_MODEL      model id (default per provider)
+    VISION_BASE_URL   endpoint for provider=openai (e.g. a local Ollama)
 """
 from __future__ import annotations
 
@@ -27,9 +29,12 @@ from typing import Callable
 
 import catalog
 
-API_URL = "https://api.anthropic.com/v1/messages"
-API_VERSION = "2023-06-01"
-DEFAULT_MODEL = "claude-opus-5"
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+ANTHROPIC_VERSION = "2023-06-01"
+# Google's OpenAI-compatible endpoint — lets the same code path serve Gemini
+# (free tier), and later a local Ollama or any other OpenAI-compatible host.
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
+DEFAULT_MODELS = {"anthropic": "claude-opus-5", "gemini": "gemini-2.0-flash"}
 
 _PROMPT = (
     "You are identifying a PlayStation 2 (PS2) game from a photo of its cover "
@@ -87,49 +92,104 @@ def _extract_json(text: str) -> dict:
         return {}
 
 
-def identify_cover(image_b64: str, media_type: str = "image/jpeg", *,
-                   api_key: str | None = None, model: str | None = None,
-                   transport: Callable = _http) -> IdentifyResult:
-    """Identify one game from one photo. Never raises into the caller — every
-    failure becomes a status, matching scandex.ScanDexClient.lookup."""
-    api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        return IdentifyResult(status="error", note="no photo-identify key set")
-    model = model or os.environ.get("VISION_MODEL") or DEFAULT_MODEL
+def _err_detail(payload) -> str:
+    if isinstance(payload, dict):
+        return (payload.get("error") or {}).get("message", "") or ""
+    return ""
 
+
+def _call_anthropic(image_b64, media_type, api_key, model, transport):
+    """Anthropic Messages API. Returns (model_text, error_note)."""
     body = json.dumps({
-        "model": model,
-        "max_tokens": 1024,
+        "model": model, "max_tokens": 1024,
         "messages": [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64",
                                          "media_type": media_type,
                                          "data": image_b64}},
-            {"type": "text", "text": _PROMPT},
-        ]}],
+            {"type": "text", "text": _PROMPT}]}],
     }).encode()
-    headers = {"x-api-key": api_key, "anthropic-version": API_VERSION,
+    headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION,
                "content-type": "application/json"}
+    status, payload = transport("POST", ANTHROPIC_URL, headers, body)
+    if status != 200:
+        d = _err_detail(payload)
+        return None, f"identify service returned {status}" + (f": {d[:120]}" if d else "")
+    if payload.get("stop_reason") == "refusal":
+        return None, "request was declined"
+    text = "".join(b.get("text", "") for b in (payload.get("content") or [])
+                   if b.get("type") == "text")
+    return text, None
+
+
+def _call_openai(image_b64, media_type, api_key, model, base_url, transport):
+    """OpenAI-compatible chat/completions (Gemini free tier, Ollama, etc.).
+    Returns (model_text, error_note)."""
+    url = base_url.rstrip("/") + "/chat/completions"
+    body = json.dumps({
+        "model": model, "max_tokens": 1024,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": _PROMPT},
+            {"type": "image_url", "image_url": {
+                "url": f"data:{media_type};base64,{image_b64}"}}]}],
+    }).encode()
+    headers = {"Authorization": "Bearer " + api_key,
+               "content-type": "application/json"}
+    status, payload = transport("POST", url, headers, body)
+    if status != 200:
+        d = _err_detail(payload)
+        return None, f"identify service returned {status}" + (f": {d[:120]}" if d else "")
+    choices = payload.get("choices") or []
+    if not choices:
+        return None, "identify service returned no content"
+    content = (choices[0].get("message") or {}).get("content", "")
+    # Some hosts return content as a list of parts; join text parts.
+    if isinstance(content, list):
+        content = "".join(p.get("text", "") for p in content
+                          if isinstance(p, dict))
+    return content, None
+
+
+def identify_cover(image_b64: str, media_type: str = "image/jpeg", *,
+                   provider: str | None = None, api_key: str | None = None,
+                   model: str | None = None, base_url: str | None = None,
+                   transport: Callable = _http) -> IdentifyResult:
+    """Identify one game from one photo. Never raises into the caller — every
+    failure becomes a status, matching scandex.ScanDexClient.lookup.
+
+    provider: "anthropic" (default) or "gemini" / "openai" (OpenAI-compatible).
+    """
+    provider = (provider or os.environ.get("VISION_PROVIDER")
+                or "anthropic").lower()
+    api_key = api_key or os.environ.get("VISION_API_KEY") \
+        or os.environ.get("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        return IdentifyResult(status="error", note="no photo-identify key set")
+    model = model or os.environ.get("VISION_MODEL") \
+        or DEFAULT_MODELS.get(provider, "")
+    if not model:
+        return IdentifyResult(status="error", note="no vision model configured")
 
     try:
-        status, payload = transport("POST", API_URL, headers, body)
+        if provider == "anthropic":
+            text, err = _call_anthropic(image_b64, media_type, api_key, model,
+                                        transport)
+        else:
+            base = base_url or os.environ.get("VISION_BASE_URL") \
+                or (GEMINI_BASE if provider == "gemini" else "")
+            if not base:
+                return IdentifyResult(status="error",
+                                      note="no vision base URL configured")
+            text, err = _call_openai(image_b64, media_type, api_key, model,
+                                     base, transport)
     except urllib.error.URLError as exc:
         return IdentifyResult(status="error", note=f"unreachable: {exc.reason}")
     except Exception as exc:                            # noqa: BLE001
         return IdentifyResult(status="error", note=f"request failed: {exc}")
 
-    if status != 200:
-        # Never echo the payload verbatim — it can contain the key on auth errs.
-        detail = (payload.get("error") or {}).get("message", "") \
-            if isinstance(payload, dict) else ""
-        return IdentifyResult(status="error",
-                              note=f"identify service returned {status}"
-                                   + (f": {detail[:120]}" if detail else ""))
-    if payload.get("stop_reason") == "refusal":
-        return IdentifyResult(status="error", note="request was declined")
+    if err:
+        return IdentifyResult(status="error", note=err)
 
-    text = "".join(b.get("text", "") for b in (payload.get("content") or [])
-                   if b.get("type") == "text")
-    data = _extract_json(text)
+    data = _extract_json(text or "")
     raw = (data.get("title") or "").strip() if data.get("title") else None
     variant = data.get("variant") or "unknown"
     confidence = data.get("confidence") or "low"

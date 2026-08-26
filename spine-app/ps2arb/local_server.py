@@ -373,9 +373,15 @@ class Handler(BaseHTTPRequestHandler):
                 if img.startswith("data:") and "," in img:
                     img = img.split(",", 1)[1]        # strip the data: URL prefix
                 media = body.get("media_type") or "image/jpeg"
-                key = _SETTINGS.get("anthropic_api_key") if _SETTINGS else ""
-                model = (_SETTINGS.get("vision_model") if _SETTINGS else "") or None
-                res = identify.identify_cover(img, media, api_key=key, model=model)
+                s = _SETTINGS
+                provider = (s.get("vision_provider") if s else "") or None
+                key = (s.get("vision_api_key") if s else "") \
+                    or (s.get("anthropic_api_key") if s else "") or ""
+                model = (s.get("vision_model") if s else "") or None
+                base = (s.get("vision_base_url") if s else "") or None
+                res = identify.identify_cover(
+                    img, media, provider=provider, api_key=key,
+                    model=model, base_url=base)
                 out = {"status": res.status, "raw_title": res.raw_title,
                        "title": res.title, "variant": res.variant,
                        "confidence": res.confidence, "note": res.note,
