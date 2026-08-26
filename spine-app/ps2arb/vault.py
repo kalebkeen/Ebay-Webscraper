@@ -37,6 +37,17 @@ try:
 except ImportError:                                    # pragma: no cover
     _HAVE_PIL = False
 
+# CLIP embeddings (desktop-only, optional). When present, the photo index
+# matches by angle-robust image embedding instead of the perceptual hash.
+try:
+    import numpy as _np
+    from sentence_transformers import SentenceTransformer
+    _HAVE_CLIP = True
+except ImportError:                                    # pragma: no cover
+    _HAVE_CLIP = False
+
+_CLIP_MODEL = None                                     # lazy-loaded once
+
 HERE = Path(__file__).resolve().parent
 DB_PATH = Path(os.environ.get("SPINE_VAULT_DB", HERE / "spine_vault.db"))
 PHOTO_DIR = Path(os.environ.get("SPINE_VAULT_PHOTOS", HERE / "vault_photos"))
@@ -72,6 +83,7 @@ CREATE TABLE IF NOT EXISTS photo_index (
     variant    TEXT,
     barcode    TEXT,              -- linked barcode if known, else ''
     file       TEXT,              -- relative filename under PHOTO_DIR
+    embedding  TEXT,              -- CLIP embedding as JSON floats, if available
     created_at TEXT DEFAULT (datetime('now'))
 );
 """
@@ -85,6 +97,11 @@ def _conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    # Migrate a pre-embedding photo_index (added 2026-08-26).
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(photo_index)")}
+    if "embedding" not in cols:
+        conn.execute("ALTER TABLE photo_index ADD COLUMN embedding TEXT")
+        conn.commit()
     return conn
 
 
@@ -255,11 +272,31 @@ def all_catalog() -> list[dict]:
 
 _HASH_SIZE = 8            # 8x9 grayscale -> 64-bit dHash
 _DEDUP_DISTANCE = 4       # near-identical shot of a title we already have
-_MATCH_DISTANCE = 10      # default "same cover" threshold (of 64 bits)
+_MATCH_DISTANCE = 10      # default dHash "same cover" threshold (of 64 bits)
+_MATCH_COSINE = 0.85      # default CLIP "same cover" cosine threshold
 
 
 def photo_available() -> bool:
     return _HAVE_PIL
+
+
+def clip_available() -> bool:
+    return _HAVE_CLIP
+
+
+def _clip():
+    global _CLIP_MODEL
+    if _CLIP_MODEL is None:
+        _CLIP_MODEL = SentenceTransformer(
+            os.environ.get("SPINE_CLIP_MODEL", "clip-ViT-B-32"))
+    return _CLIP_MODEL
+
+
+def _embed(image_bytes: bytes) -> list[float]:
+    """A unit-normalized CLIP image embedding (cosine == dot product)."""
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    vec = _clip().encode(img, normalize_embeddings=True)
+    return [float(x) for x in vec]
 
 
 def _dhash(image_bytes: bytes) -> str:
@@ -287,6 +324,7 @@ def add_photo(image_b64: str, title: str, variant: str = "unknown",
               barcode: str = "") -> dict:
     """Store a confirmed photo + label. Skips a near-duplicate of a title we
     already hold, so re-scanning the same game doesn't bloat the set."""
+    import json as _json
     if not _HAVE_PIL:
         return {"ok": False, "detail": "photo index unavailable (no Pillow)"}
     try:
@@ -294,6 +332,12 @@ def add_photo(image_b64: str, title: str, variant: str = "unknown",
         phash = _dhash(raw)
     except Exception as exc:                            # noqa: BLE001
         return {"ok": False, "detail": f"bad image: {exc}"}
+    emb = None
+    if _HAVE_CLIP:
+        try:
+            emb = _json.dumps(_embed(raw))
+        except Exception:                               # noqa: BLE001
+            emb = None                                  # degrade to dHash-only
 
     conn = _conn()
     try:
@@ -306,8 +350,8 @@ def add_photo(image_b64: str, title: str, variant: str = "unknown",
                         "total": total}
         PHOTO_DIR.mkdir(parents=True, exist_ok=True)
         cur = conn.execute(
-            "INSERT INTO photo_index (phash,title,variant,barcode,file) "
-            "VALUES (?,?,?,?,?)", (phash, title, variant, barcode, ""))
+            "INSERT INTO photo_index (phash,title,variant,barcode,file,embedding) "
+            "VALUES (?,?,?,?,?,?)", (phash, title, variant, barcode, "", emb))
         rid = cur.lastrowid
         fname = f"{rid:06d}_{phash[:8]}.jpg"
         (PHOTO_DIR / fname).write_bytes(raw)
@@ -319,30 +363,61 @@ def add_photo(image_b64: str, title: str, variant: str = "unknown",
     return {"ok": True, "stored": True, "id": rid, "total": total}
 
 
-def match_photo(image_b64: str, max_distance: int = _MATCH_DISTANCE) -> dict:
-    """Nearest stored photo by hash. Returns the label if within threshold."""
+def match_photo(image_b64: str, max_distance: int = _MATCH_DISTANCE,
+                min_cosine: float = _MATCH_COSINE) -> dict:
+    """Nearest stored photo. Prefers CLIP cosine (angle-robust) when available,
+    falls back to the perceptual hash. Returns the label if within threshold."""
     if not _HAVE_PIL:
         return {"matched": None, "detail": "photo index unavailable (no Pillow)"}
     try:
-        phash = _dhash(base64.b64decode(image_b64))
+        raw = base64.b64decode(image_b64)
     except Exception as exc:                            # noqa: BLE001
         return {"matched": None, "detail": f"bad image: {exc}"}
 
     conn = _conn()
     try:
-        rows = conn.execute(
-            "SELECT phash, title, variant, barcode FROM photo_index").fetchall()
+        rows = conn.execute("SELECT phash, title, variant, barcode, embedding "
+                            "FROM photo_index").fetchall()
     finally:
         conn.close()
+    if not rows:
+        return {"matched": None, "best_distance": None}
 
+    def _hit(r, extra):
+        return {"matched": {"title": r["title"], "variant": r["variant"],
+                            "barcode": r["barcode"], **extra}}
+
+    # CLIP first, over rows that carry an embedding.
+    if _HAVE_CLIP:
+        try:
+            import json as _json
+            q = _np.array(_embed(raw), dtype=_np.float32)
+            best, best_sim = None, -1.0
+            for r in rows:
+                if not r["embedding"]:
+                    continue
+                e = _np.asarray(_json.loads(r["embedding"]), dtype=_np.float32)
+                sim = float(q @ e)
+                if sim > best_sim:
+                    best, best_sim = r, sim
+            if best is not None and best_sim >= min_cosine:
+                return {**_hit(best, {"similarity": round(best_sim, 3)}),
+                        "method": "clip"}
+        except Exception:                               # noqa: BLE001
+            pass                                        # fall through to dHash
+
+    # dHash fallback (also covers any rows without an embedding).
+    try:
+        phash = _dhash(raw)
+    except Exception as exc:                            # noqa: BLE001
+        return {"matched": None, "detail": f"bad image: {exc}"}
     best, best_d = None, 65
     for r in rows:
         d = _hamming(phash, r["phash"])
         if d < best_d:
             best, best_d = r, d
     if best is not None and best_d <= max_distance:
-        return {"matched": {"title": best["title"], "variant": best["variant"],
-                            "barcode": best["barcode"], "distance": best_d}}
+        return {**_hit(best, {"distance": best_d}), "method": "dhash"}
     return {"matched": None, "best_distance": (best_d if best else None)}
 
 
@@ -360,4 +435,6 @@ def stats() -> dict:
         conn.close()
     return {"upc_total": n, "upc_confirmed": confirmed,
             "scandex_cached": scandex, "catalog_titles": cat,
-            "photos": photos, "photo_index": _HAVE_PIL, "db": str(DB_PATH)}
+            "photos": photos, "photo_index": _HAVE_PIL,
+            "photo_match": "clip" if _HAVE_CLIP else "dhash",
+            "db": str(DB_PATH)}

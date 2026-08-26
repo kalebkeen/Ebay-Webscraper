@@ -243,11 +243,20 @@ photos with a perceptual hash (`vault.add_photo`/`match_photo`, tables
 `photo_index` + files under `vault_photos/`; routes `POST /v1/vault/photo` and
 `POST /v1/vault/photo/match`). `/api/identify` checks it **first** — a repeat
 cover resolves free and instant, no vision-API call — and stores each confirmed
-photo so the library grows and Gemini gets called less over time. dHash is
-deliberately light (**Pillow, desktop-only** — guarded so the keystore still
-runs without it; never enters the APK); a CLIP-embedding backend can replace
-`_signature`/`_dhash` later for cross-angle robustness. Captured photos + labels
-are also the dataset for any future embedding index or fine-tune.
+photo so the library grows and Gemini gets called less over time. Captured
+photos + labels are also the dataset for any future work.
+
+**Matching (2026-08-26): two backends, chosen automatically.**
+- **CLIP embeddings** (angle-robust) when `sentence-transformers`/torch is
+  installed — `match_photo` uses cosine over stored embeddings (`_MATCH_COSINE`,
+  default 0.85); each photo's embedding is stored in the `embedding` column.
+- **dHash** perceptual hash (`Pillow` only) as the fallback, and for any rows
+  without an embedding.
+Both are **desktop-only** and guarded (the keystore still runs without either;
+neither ever enters the APK). `stats.photo_match` reports which is live.
+**Note: torch has no Python 3.14 wheels — the desktop keystore runs under
+Python 3.12** (installed side-by-side) so CLIP is available; the phone/APK is
+unaffected either way.
 
 Not yet done in Phase 2: the store.py **sold-price harvest** (needs eBay keys —
 the real payoff, deferred with the eBay work).

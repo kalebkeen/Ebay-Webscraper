@@ -47,6 +47,11 @@ def main() -> int:
         print("Pillow not installed — photo index unavailable; skipping.")
         return 0
 
+    # Force dHash for the core checks so they're deterministic whether or not
+    # torch/CLIP is installed; the CLIP path gets its own section at the end.
+    orig_clip = vault._HAVE_CLIP
+    vault._HAVE_CLIP = False
+
     imgA = noise_b64(1)          # reused bytes -> identical hash on match
     imgB = noise_b64(2)          # a clearly different "cover"
 
@@ -105,6 +110,24 @@ def main() -> int:
     check("phone reaches photo index", vm and vm["matched"]["title"] == "Ico")
 
     httpd.shutdown()
+
+    # ---- CLIP path (only if torch/sentence-transformers is installed) ----
+    vault._HAVE_CLIP = orig_clip
+    if vault.clip_available():
+        import numpy as np
+        va = vault._embed(base64.b64decode(imgA))
+        vb = vault._embed(base64.b64decode(imgB))
+        check("clip embedding dim 512", len(va) == 512)
+        check("clip embedding deterministic",
+              max(abs(a - b) for a, b in zip(va, vault._embed(base64.b64decode(imgA)))) < 1e-4)
+        check("clip: identical is most similar",
+              float(np.asarray(va) @ np.asarray(va)) > float(np.asarray(va) @ np.asarray(vb)))
+        vault.add_photo(noise_b64(4), "God of War")     # stored WITH embedding
+        m = vault.match_photo(noise_b64(4))
+        check("clip match uses embeddings",
+              m.get("method") == "clip" and m["matched"]["title"] == "God of War")
+    else:
+        print("(sentence-transformers/torch not installed — CLIP checks skipped)")
 
     failures = [n for n, ok in CHECKS if not ok]
     print("-" * 72)
