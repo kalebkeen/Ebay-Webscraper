@@ -99,6 +99,24 @@ def main() -> int:
                               payload={"error": {"message": "rate limited"}}))
     check("gemini http error surfaced", r.status == "error" and "429" in r.note)
 
+    # 9. Shelf mode: one photo -> a list of titles.
+    arr = json.dumps([
+        {"title": "Ico", "variant": "unknown", "confidence": "high"},
+        {"title": "Okami", "variant": "unknown", "confidence": "medium"},
+        {"title": "Nonexistent Game 12345", "variant": "unknown", "confidence": "low"}])
+    rows = identify.identify_shelf("Zm9v", api_key=KEY, transport=fake(arr))
+    titles = [r.title for r in rows if r.status == "matched"]
+    check("shelf found both known titles", "Ico" in titles and "Okami" in titles)
+    check("shelf marks unknown as unmatched",
+          any(r.status == "unmatched" and r.raw_title == "Nonexistent Game 12345"
+              for r in rows))
+    rows = identify.identify_shelf("Zm9v", api_key=KEY, transport=fake("[]"))
+    check("empty shelf -> no_game", len(rows) == 1 and rows[0].status == "no_game")
+    rows = identify.identify_shelf(
+        "Zm9v", api_key=KEY,
+        transport=fake(status=401, payload={"error": {"message": "bad"}}))
+    check("shelf http error -> error", len(rows) == 1 and rows[0].status == "error")
+
     failures = [n for n, ok in CHECKS if not ok]
     print("-" * 72)
     for n, ok in CHECKS:

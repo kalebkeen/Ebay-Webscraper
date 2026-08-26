@@ -36,16 +36,27 @@ ANTHROPIC_VERSION = "2023-06-01"
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 DEFAULT_MODELS = {"anthropic": "claude-opus-5", "gemini": "gemini-2.0-flash"}
 
-_PROMPT = (
-    "You are identifying a PlayStation 2 (PS2) game from a photo of its cover "
-    "or spine. Respond with ONLY a JSON object and no other text. Keys:\n"
-    '  "title": the game\'s title exactly as printed, or null if you cannot '
-    "read a PS2 game title in the image.\n"
-    '  "variant": one of "black_label", "greatest_hits", or "unknown". '
+_VARIANT_NOTE = (
+    '"variant" is one of "black_label", "greatest_hits", or "unknown" — '
     "Greatest Hits / Platinum / The Best budget reprints have a distinctly "
-    "coloured spine or logo; use \"unknown\" if you cannot tell.\n"
-    '  "confidence": one of "high", "medium", "low".\n'
-    "If the image is not a PS2 game, set title to null."
+    'coloured spine or logo; use "unknown" if you cannot tell. '
+    '"confidence" is one of "high", "medium", "low".'
+)
+_PROMPT_SINGLE = (
+    "You are identifying a PlayStation 2 (PS2) game from a photo of its cover "
+    "or spine. Respond with ONLY a JSON object and no other text with keys "
+    '"title" (the title exactly as printed, or null if you cannot read a PS2 '
+    'game title), "variant", "confidence". ' + _VARIANT_NOTE +
+    " If the image is not a PS2 game, set title to null."
+)
+_PROMPT_MULTI = (
+    "You are identifying PlayStation 2 (PS2) games from a photo that shows one "
+    "or more game spines or covers (e.g. a shelf or a stack). Respond with "
+    "ONLY a JSON array and no other text. Each element is an object with keys "
+    '"title" (the title exactly as printed), "variant", "confidence". '
+    + _VARIANT_NOTE +
+    " Include every distinct PS2 game you can read; use an empty array [] if "
+    "you cannot read any."
 )
 
 
@@ -92,21 +103,33 @@ def _extract_json(text: str) -> dict:
         return {}
 
 
+def _extract_json_array(text: str) -> list:
+    """Pull the JSON array out of the model's reply, tolerantly."""
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end <= start:
+        return []
+    try:
+        data = json.loads(text[start:end + 1])
+        return data if isinstance(data, list) else []
+    except json.JSONDecodeError:
+        return []
+
+
 def _err_detail(payload) -> str:
     if isinstance(payload, dict):
         return (payload.get("error") or {}).get("message", "") or ""
     return ""
 
 
-def _call_anthropic(image_b64, media_type, api_key, model, transport):
+def _call_anthropic(image_b64, media_type, prompt, api_key, model, transport):
     """Anthropic Messages API. Returns (model_text, error_note)."""
     body = json.dumps({
-        "model": model, "max_tokens": 1024,
+        "model": model, "max_tokens": 2048,
         "messages": [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64",
                                          "media_type": media_type,
                                          "data": image_b64}},
-            {"type": "text", "text": _PROMPT}]}],
+            {"type": "text", "text": prompt}]}],
     }).encode()
     headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION,
                "content-type": "application/json"}
@@ -121,14 +144,14 @@ def _call_anthropic(image_b64, media_type, api_key, model, transport):
     return text, None
 
 
-def _call_openai(image_b64, media_type, api_key, model, base_url, transport):
+def _call_openai(image_b64, media_type, prompt, api_key, model, base_url, transport):
     """OpenAI-compatible chat/completions (Gemini free tier, Ollama, etc.).
     Returns (model_text, error_note)."""
     url = base_url.rstrip("/") + "/chat/completions"
     body = json.dumps({
-        "model": model, "max_tokens": 1024,
+        "model": model, "max_tokens": 2048,
         "messages": [{"role": "user", "content": [
-            {"type": "text", "text": _PROMPT},
+            {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {
                 "url": f"data:{media_type};base64,{image_b64}"}}]}],
     }).encode()
@@ -149,56 +172,44 @@ def _call_openai(image_b64, media_type, api_key, model, base_url, transport):
     return content, None
 
 
-def identify_cover(image_b64: str, media_type: str = "image/jpeg", *,
-                   provider: str | None = None, api_key: str | None = None,
-                   model: str | None = None, base_url: str | None = None,
-                   transport: Callable = _http) -> IdentifyResult:
-    """Identify one game from one photo. Never raises into the caller — every
-    failure becomes a status, matching scandex.ScanDexClient.lookup.
-
-    provider: "anthropic" (default) or "gemini" / "openai" (OpenAI-compatible).
-    """
+def _model_text(image_b64, media_type, prompt, *, provider, api_key, model,
+                base_url, transport):
+    """Resolve provider/key/model, call the vision model, return (text, err)."""
     provider = (provider or os.environ.get("VISION_PROVIDER")
                 or "anthropic").lower()
     api_key = api_key or os.environ.get("VISION_API_KEY") \
         or os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
-        return IdentifyResult(status="error", note="no photo-identify key set")
+        return None, "no photo-identify key set"
     model = model or os.environ.get("VISION_MODEL") \
         or DEFAULT_MODELS.get(provider, "")
     if not model:
-        return IdentifyResult(status="error", note="no vision model configured")
-
+        return None, "no vision model configured"
     try:
         if provider == "anthropic":
-            text, err = _call_anthropic(image_b64, media_type, api_key, model,
-                                        transport)
-        else:
-            base = base_url or os.environ.get("VISION_BASE_URL") \
-                or (GEMINI_BASE if provider == "gemini" else "")
-            if not base:
-                return IdentifyResult(status="error",
-                                      note="no vision base URL configured")
-            text, err = _call_openai(image_b64, media_type, api_key, model,
-                                     base, transport)
+            return _call_anthropic(image_b64, media_type, prompt, api_key,
+                                   model, transport)
+        base = base_url or os.environ.get("VISION_BASE_URL") \
+            or (GEMINI_BASE if provider == "gemini" else "")
+        if not base:
+            return None, "no vision base URL configured"
+        return _call_openai(image_b64, media_type, prompt, api_key, model,
+                            base, transport)
     except urllib.error.URLError as exc:
-        return IdentifyResult(status="error", note=f"unreachable: {exc.reason}")
+        return None, f"unreachable: {exc.reason}"
     except Exception as exc:                            # noqa: BLE001
-        return IdentifyResult(status="error", note=f"request failed: {exc}")
+        return None, f"request failed: {exc}"
 
-    if err:
-        return IdentifyResult(status="error", note=err)
 
-    data = _extract_json(text or "")
-    raw = (data.get("title") or "").strip() if data.get("title") else None
-    variant = data.get("variant") or "unknown"
-    confidence = data.get("confidence") or "low"
-
+def _resolve_title(raw, variant, confidence) -> IdentifyResult:
+    """Turn a title the model read into a catalog-resolved result."""
+    raw = (raw or "").strip()
+    variant = variant or "unknown"
+    confidence = confidence or "low"
     if not raw:
         return IdentifyResult(status="no_game", variant=variant,
                               confidence=confidence,
                               note="couldn't read a PS2 game in the photo")
-
     m = catalog.match(raw)
     if m.title is not None and m.confident:
         return IdentifyResult(raw_title=raw, title=m.title.canonical,
@@ -207,5 +218,46 @@ def identify_cover(image_b64: str, media_type: str = "image/jpeg", *,
     return IdentifyResult(
         raw_title=raw, variant=variant, confidence=confidence,
         match_score=m.score, status="unmatched",
-        note=f"read “{raw}” but no confident catalog match "
-             f"(best {m.score:.0f})")
+        note=f"read “{raw}” but no confident catalog match (best {m.score:.0f})")
+
+
+def identify_cover(image_b64: str, media_type: str = "image/jpeg", *,
+                   provider: str | None = None, api_key: str | None = None,
+                   model: str | None = None, base_url: str | None = None,
+                   transport: Callable = _http) -> IdentifyResult:
+    """Identify one game from one photo. Never raises — failures become a status.
+
+    provider: "anthropic" (default) or "gemini" / "openai" (OpenAI-compatible).
+    """
+    text, err = _model_text(image_b64, media_type, _PROMPT_SINGLE,
+                            provider=provider, api_key=api_key, model=model,
+                            base_url=base_url, transport=transport)
+    if err:
+        return IdentifyResult(status="error", note=err)
+    data = _extract_json(text or "")
+    return _resolve_title(data.get("title"), data.get("variant"),
+                          data.get("confidence"))
+
+
+def identify_shelf(image_b64: str, media_type: str = "image/jpeg", *,
+                   provider: str | None = None, api_key: str | None = None,
+                   model: str | None = None, base_url: str | None = None,
+                   transport: Callable = _http) -> list[IdentifyResult]:
+    """Identify every PS2 game in one photo of multiple spines/covers.
+
+    Returns a list of IdentifyResult (matched or unmatched per game). On any
+    request/parse error, returns a single-element list with status='error'.
+    """
+    text, err = _model_text(image_b64, media_type, _PROMPT_MULTI,
+                            provider=provider, api_key=api_key, model=model,
+                            base_url=base_url, transport=transport)
+    if err:
+        return [IdentifyResult(status="error", note=err)]
+    rows = _extract_json_array(text or "")
+    results = [_resolve_title(r.get("title"), r.get("variant"),
+                              r.get("confidence"))
+               for r in rows if isinstance(r, dict) and r.get("title")]
+    if not results:
+        return [IdentifyResult(status="no_game",
+                               note="couldn't read any PS2 games in the photo")]
+    return results

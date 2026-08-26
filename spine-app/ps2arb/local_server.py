@@ -454,6 +454,37 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, r or {"ok": False,
                                              "detail": "vault unreachable"})
 
+            if route == "/api/identify/shelf":
+                # One photo of several spines/covers -> a list of titles+prices.
+                import identify
+                img = body.get("image") or ""
+                if img.startswith("data:") and "," in img:
+                    img = img.split(",", 1)[1]
+                media = body.get("media_type") or "image/jpeg"
+                s = _SETTINGS
+                provider = (s.get("vision_provider") if s else "") or None
+                key = (s.get("vision_api_key") if s else "") \
+                    or (s.get("anthropic_api_key") if s else "") or ""
+                model = (s.get("vision_model") if s else "") or None
+                base = (s.get("vision_base_url") if s else "") or None
+                results = identify.identify_shelf(
+                    img, media, provider=provider, api_key=key,
+                    model=model, base_url=base)
+                items = []
+                for r in results:
+                    item = {"status": r.status, "raw_title": r.raw_title,
+                            "title": r.title, "variant": r.variant,
+                            "confidence": r.confidence, "note": r.note}
+                    if r.usable:
+                        try:
+                            item["price"] = core.value(
+                                _SOURCE, _SOURCE_IS_REAL, title=r.title,
+                                variant=r.variant)
+                        except core.ApiError as exc:
+                            item["price_error"] = exc.detail
+                    items.append(item)
+                return self._send(200, {"results": items})
+
             if route == "/api/settings":
                 if _SETTINGS is None:
                     return self._send(503, {"detail": "settings unavailable"})

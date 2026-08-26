@@ -254,7 +254,9 @@ input::placeholder{color:var(--dim)}
 
 <div class="field">
   <input type="file" id="photo" accept="image/*" capture="environment" hidden>
+  <input type="file" id="shelf" accept="image/*" capture="environment" hidden>
   <button class="btn ghost" id="photoBtn">Identify from a photo</button>
+  <button class="btn ghost" id="shelfBtn">Identify a shelf (multiple)</button>
   <div id="photoState" class="muted"></div>
   <div id="photoResult"></div>
 </div>
@@ -629,6 +631,45 @@ backupData(true);
       out.innerHTML = ''; state.textContent = 'Confirmed — saved to your library.';
     });
     $('#idNo').addEventListener('click', ()=>{ out.innerHTML=''; state.textContent=''; });
+  }
+
+  // ---- shelf: one photo -> many titles ----
+  const sBtn = $('#shelfBtn'), sInput = $('#shelf');
+  sBtn.addEventListener('click', ()=> sInput.click());
+  sInput.addEventListener('change', async ()=>{
+    const file = sInput.files && sInput.files[0];
+    if(!file) return;
+    out.innerHTML = ''; state.textContent = 'Reading photo…';
+    try{
+      const b64 = await shrink(file, 1400, 0.8);
+      state.textContent = 'Identifying games…';
+      const r = await fetch('/api/identify/shelf', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({image: b64, media_type: 'image/jpeg'})});
+      renderShelf(((await r.json()).results) || []);
+    }catch(e){ state.textContent = 'Could not identify: ' + e.message; }
+    sInput.value = '';
+  });
+
+  function renderShelf(list){
+    if(list.length === 1 && list[0].status === 'error'){ state.textContent = list[0].note || 'Identify unavailable.'; return; }
+    const matched = list.filter(x => x.status === 'matched');
+    const unmatched = list.filter(x => x.status === 'unmatched');
+    if(!matched.length && !unmatched.length){ state.textContent = 'No PS2 games found in that photo.'; return; }
+    state.textContent = matched.length + ' game' + (matched.length===1?'':'s') + ' found'
+      + (unmatched.length ? ' · ' + unmatched.length + ' unrecognized' : '');
+    let html = '<div class="card"><div class="muted">Best-guess IDs — check the spines before you pay.</div>';
+    for(const d of matched){
+      const p = d.price || {};
+      const line = p.quotable ? ('max bid ' + money(p.max_bid) + ' · resale ~' + money(p.expected_resale))
+                              : (d.price_error || 'no price data');
+      html += '<div style="margin-top:8px"><b>' + esc(d.title) + '</b> <span class="muted">(' + esc(d.confidence) + ')</span>'
+            + '<br><span class="muted">' + esc(line) + '</span></div>';
+    }
+    for(const d of unmatched){
+      html += '<div style="margin-top:8px" class="muted">read “' + esc(d.raw_title||'') + '” — not in catalog</div>';
+    }
+    out.innerHTML = html + '</div>';
   }
 })();
 
