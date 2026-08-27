@@ -125,6 +125,34 @@ def main() -> int:
     check("closed mode still 401s without a token", st == 401)
     ch.shutdown()
 
+    # settings.resolve() bridges the keystore store to the desktop tools: a
+    # token set with `keystore.py set` lives in keystore.json, but precompute /
+    # seed_covers read the settings store. resolve() must find it in either.
+    check("thegamesdb_token is now a registered keystore field",
+          "thegamesdb_token" in settings.FIELDS
+          and "thegamesdb_token" in settings.KEYSTORE_SERVED_FIELDS
+          and "thegamesdb_token" in settings.SECRET_FIELDS)
+    saved_store, saved_ks = settings.STORE_PATH, settings.KEYSTORE_STORE_PATH
+    empty = TMP / "settings_empty.json"
+    ksfile = TMP / "resolve_ks.json"
+    ksfile.write_text(json.dumps({"soldcomps_token": "sc_fromkeystore"}))
+    for env in ("SOLDCOMPS_TOKEN", "PRICECHARTING_TOKEN", "THEGAMESDB_TOKEN"):
+        os.environ.pop(env, None)
+    settings.STORE_PATH = empty
+    settings.KEYSTORE_STORE_PATH = ksfile
+    try:
+        if empty.exists():
+            empty.unlink()
+        check("resolve reads a token from the keystore store when local is empty",
+              settings.resolve("soldcomps_token") == "sc_fromkeystore")
+        empty.write_text(json.dumps({"soldcomps_token": "sc_local"}))
+        check("resolve prefers the local settings store over the keystore",
+              settings.resolve("soldcomps_token") == "sc_local")
+        check("resolve returns '' for a field set in neither store",
+              settings.resolve("pricecharting_token") == "")
+    finally:
+        settings.STORE_PATH, settings.KEYSTORE_STORE_PATH = saved_store, saved_ks
+
     failures = [n for n, ok in CHECKS if not ok]
     print("-" * 72)
     for n, ok in CHECKS:

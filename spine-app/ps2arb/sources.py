@@ -94,12 +94,22 @@ def build_source(data_dir=None, today: date | None = None, *,
     settings = settings or _load_settings()
 
     def cred(field: str) -> str:
+        # An explicitly injected settings object (tests) is authoritative.
         if settings is not None:
             try:
-                return (settings.get(field) or "").strip()
+                v = (settings.get(field) or "").strip()
+                if v:
+                    return v
             except Exception:
                 pass
-        return (os.environ.get(field.upper(), "") or "").strip()
+            return (os.environ.get(field.upper(), "") or "").strip()
+        # Real run: resolve across the settings store, the desktop keystore
+        # store, and the environment, so `keystore.py set <token>` is honoured.
+        try:
+            import settings as _s
+            return (_s.resolve(field) or "").strip()
+        except Exception:
+            return (os.environ.get(field.upper(), "") or "").strip()
 
     real: list = []
 

@@ -410,15 +410,14 @@ _TGDB_PAGE_SIZE = 20                 # games per ByPlatformID page.
 
 
 def _credential(field: str) -> str:
-    """Read a credential from the desktop keystore, else the environment.
-
-    Mirrors sources.build_source's `cred` so there is one story about where
-    credentials come from. Returns "" rather than raising, so a missing key is
-    a clean 'not configured' message instead of a traceback.
+    """Read a credential from the settings store, the desktop keystore store,
+    or the environment -- the same resolution sources.build_source uses, so
+    there is one story about where credentials come from. Returns "" rather
+    than raising, so a missing key is a clean 'not configured' message.
     """
     try:
         import settings as _settings
-        value = _settings.Settings().get(field)
+        value = _settings.resolve(field)
         if value and str(value).strip():
             return str(value).strip()
     except Exception:                                   # noqa: BLE001

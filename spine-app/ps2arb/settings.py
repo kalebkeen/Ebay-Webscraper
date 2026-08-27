@@ -34,6 +34,9 @@ FIELDS = {
     "ebay_client_secret": "EBAY_CLIENT_SECRET",
     "pricecharting_token": "PRICECHARTING_TOKEN",
     "soldcomps_token":    "SOLDCOMPS_TOKEN",
+    # Desktop-only cover-art seeding (seed_covers.py); the phone never uses it,
+    # but it is a keystore field so `keystore.py set` works uniformly for it.
+    "thegamesdb_token":   "THEGAMESDB_TOKEN",
     # Photo identification (a scanned cover/spine -> title). vision_api_key is
     # a secret; provider/model/base_url are plain config with defaults in
     # identify.py. anthropic_api_key stays as a back-compat fallback key.
@@ -51,17 +54,48 @@ FIELDS = {
 
 # Never echoed back to the client in full.
 SECRET_FIELDS = {"scandex_token", "ebay_client_secret", "pricecharting_token",
-                 "soldcomps_token", "vision_api_key", "anthropic_api_key",
-                 "keystore_token"}
+                 "soldcomps_token", "thegamesdb_token", "vision_api_key",
+                 "anthropic_api_key", "keystore_token"}
 
 # The durable service credentials/config the desktop keystore stores and
 # serves. A sync writes only these back into settings, so it can never clobber
 # the keystore_url / keystore_token the phone needs to reach the keystore.
 KEYSTORE_SERVED_FIELDS = {
     "scandex_token", "ebay_client_id", "ebay_client_secret",
-    "pricecharting_token", "soldcomps_token", "vision_provider",
-    "vision_api_key", "vision_model", "vision_base_url", "anthropic_api_key",
+    "pricecharting_token", "soldcomps_token", "thegamesdb_token",
+    "vision_provider", "vision_api_key", "vision_model", "vision_base_url",
+    "anthropic_api_key",
 }
+
+# The desktop keystore writes its OWN store (keystore.json); the desktop's
+# other tools -- precompute, seed_covers, service (via sources.build_source) --
+# read the settings store here. Those are different files, so a token set with
+# `keystore.py set` would otherwise be invisible to them. resolve() bridges the
+# gap. On the phone there is no keystore.json (settings.json is the synced
+# copy), so this degrades to the ordinary lookup there.
+KEYSTORE_STORE_PATH = Path(os.environ.get(
+    "SPINE_KEYSTORE_STORE", Path(__file__).parent / "keystore.json"))
+
+
+def resolve(field: str) -> str:
+    """A credential from the local settings store, else the desktop keystore
+    store, else the environment. Never raises; returns '' when unset.
+
+    So `keystore.py set soldcomps_token ...` (or thegamesdb_token) is picked up
+    by the desktop tools even though those tools read a different store than the
+    keystore writes.
+    """
+    primary = Settings()
+    value = primary.get(field)                # settings.json data, else env
+    if value:
+        return value
+    try:
+        if (field in FIELDS and KEYSTORE_STORE_PATH.exists()
+                and KEYSTORE_STORE_PATH != primary.path):
+            return Settings(KEYSTORE_STORE_PATH).get(field)
+    except Exception:
+        pass
+    return ""
 
 
 class Settings:
