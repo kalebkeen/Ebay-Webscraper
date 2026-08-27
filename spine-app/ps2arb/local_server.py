@@ -36,6 +36,7 @@ _UPC = None
 _SCANDEX = None
 _EBAY = None
 _SETTINGS = None
+_OUTBOX = None
 _STATIC = Path(__file__).parent / "static"
 
 
@@ -174,6 +175,15 @@ def sync_vault() -> dict:
     except Exception as exc:                            # noqa: BLE001
         out["scandex_error"] = str(exc)
 
+    # Confirmed photos queued while offline — flush the on-phone outbox to the
+    # vault now. Best-effort; anything still unreachable stays queued.
+    try:
+        pf = _flush_photo_outbox()
+        out["photos_synced"] = pf["synced"]
+        out["photos_pending"] = pf["pending"]
+    except Exception as exc:                            # noqa: BLE001
+        out["photo_error"] = str(exc)
+
     # Catalog override — pulled for the NEXT launch to consume. Same path
     # catalog.py reads (SPINE_CATALOG_OVERRIDE keeps them in lockstep).
     try:
@@ -217,6 +227,33 @@ def _vault_call(method: str, path: str, payload=None, timeout: float = 12.0):
         return None
 
 
+def _flush_photo_outbox(limit: int = 50) -> dict:
+    """Push queued photos to the vault, oldest first; drop each on success.
+
+    Stops at the first UNREACHABLE result so the rest wait for the next sync
+    (we don't want to churn while offline). A reachable-but-rejected photo
+    (a genuinely bad image) is dropped so it can't wedge the queue; a vault
+    that's up but not ready (no Pillow yet) is left to retry. Returns
+    {synced, dropped, pending}."""
+    if _OUTBOX is None:
+        return {"synced": 0, "dropped": 0, "pending": 0}
+    synced = dropped = 0
+    for item in _OUTBOX.pending()[:limit]:
+        r = _vault_call("POST", "/v1/vault/photo", {
+            "image": item.get("image", ""), "title": item.get("title", ""),
+            "variant": item.get("variant") or "unknown",
+            "barcode": item.get("barcode") or ""})
+        if r is None:
+            break                                  # unreachable — retry later
+        if r.get("ok"):
+            _OUTBOX.remove(item.get("id", "")); synced += 1
+        elif "Pillow" in (r.get("detail") or ""):
+            break                                  # up but not ready; retry
+        else:
+            _OUTBOX.remove(item.get("id", "")); dropped += 1   # bad image
+    return {"synced": synced, "dropped": dropped, "pending": _OUTBOX.count()}
+
+
 def _startup_sync() -> None:
     """Keys first, then the barcode index — both best-effort, off the hot path."""
     try:
@@ -229,7 +266,7 @@ def _startup_sync() -> None:
 def configure(source, source_is_real: bool = False, upc_index=None,
               static_dir: Path | None = None, scandex_client=None,
               settings_store=None) -> None:
-    global _SOURCE, _SOURCE_IS_REAL, _UPC, _STATIC, _SCANDEX, _SETTINGS
+    global _SOURCE, _SOURCE_IS_REAL, _UPC, _STATIC, _SCANDEX, _SETTINGS, _OUTBOX
     _SOURCE = source
     _SOURCE_IS_REAL = source_is_real
     _UPC = upc_index
@@ -237,6 +274,15 @@ def configure(source, source_is_real: bool = False, upc_index=None,
     _SETTINGS = settings_store
     if static_dir:
         _STATIC = Path(static_dir)
+    # The photo outbox lives beside the barcode index — the same app-private,
+    # writable directory — so confirmed photos survive an offline capture.
+    try:
+        import photo_outbox
+        base = (Path(getattr(_UPC, "path", "")).parent if _UPC is not None
+                else Path(__file__).parent)
+        _OUTBOX = photo_outbox.PhotoOutbox(base / "photo_outbox")
+    except Exception:                                  # noqa: BLE001
+        _OUTBOX = None
     if _SETTINGS is not None and scandex_client is None:
         rebuild_clients()
 
@@ -441,18 +487,28 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, out)
 
             if route == "/api/identify/remember":
-                # Store a confirmed photo + label to the desktop dataset so the
-                # photo index grows and future scans of it are free.
+                # Store a confirmed photo + label so the photo index grows and
+                # future scans of it are free. Write to the on-phone outbox
+                # FIRST (so an offline capture is never lost), then flush to the
+                # vault in the background; whatever can't send now is retried on
+                # the next sync.
                 img = body.get("image") or ""
                 if img.startswith("data:") and "," in img:
                     img = img.split(",", 1)[1]
                 title = body.get("title") or ""
                 if not img or not title:
                     return self._send(400, {"detail": "image and title required"})
-                r = _vault_call("POST", "/v1/vault/photo", {
-                    "image": img, "title": title,
-                    "variant": body.get("variant") or "unknown",
-                    "barcode": body.get("barcode") or ""})
+                item = {"image": img, "title": title,
+                        "variant": body.get("variant") or "unknown",
+                        "barcode": body.get("barcode") or ""}
+                if _OUTBOX is not None:
+                    _OUTBOX.enqueue(item)
+                    threading.Thread(target=_flush_photo_outbox, daemon=True,
+                                     name="spine-photo-flush").start()
+                    return self._send(200, {"ok": True, "queued": True,
+                                            "pending": _OUTBOX.count()})
+                # No local outbox (e.g. desktop): best-effort direct push.
+                r = _vault_call("POST", "/v1/vault/photo", item)
                 return self._send(200, r or {"ok": False,
                                              "detail": "vault unreachable"})
 
@@ -507,6 +563,19 @@ class Handler(BaseHTTPRequestHandler):
                     raise core.ApiError(404, f"'{title}' is not in the catalog")
                 saved = _UPC.teach(code, title,
                                    body.get("variant", "unknown"))
+                # Autosync this one scan to the vault in the background. If it
+                # fails it's already saved in the local index and rides the
+                # next full sync (launch or the manual button), so we never
+                # block the scan on the network.
+                try:
+                    from dataclasses import asdict as _asdict
+                    entry = _asdict(saved)
+                    threading.Thread(
+                        target=lambda: _vault_call(
+                            "POST", "/v1/vault/upc", {"entries": [entry]}),
+                        daemon=True, name="spine-upc-push").start()
+                except Exception:                          # noqa: BLE001
+                    pass
                 return self._send(200, {"saved": True, "upc": code,
                                         "title": title,
                                         "observations": getattr(saved, "observations", 1)})

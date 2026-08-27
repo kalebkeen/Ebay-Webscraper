@@ -33,9 +33,9 @@ anything that doesn't move toward real prices.
 - **The desktop keystore runs under Python 3.12**
   (`C:\Users\kaleb\AppData\Local\Programs\Python\Python312\`), NOT 3.14 — torch
   has no 3.14 wheels. 3.14 still runs the keystore but falls back to dHash.
-- **Tests** are plain scripts: `python test_x.py` (exit code), no pytest. Nine
+- **Tests** are plain scripts: `python test_x.py` (exit code), no pytest. Ten
   suites: corpus, adversarial, comps, economics, backtest, keystore, vault,
-  identify, photo. Run all + the stdlib guard before pushing.
+  identify, photo, outbox. Run all + the stdlib guard before pushing.
 - Windows `python3` is a Store stub; use `/c/Python314/python` or the 3.12 path.
 - **Secrets:** Claude never enters API keys. The user sets them on the desktop
   keystore (`python keystore.py set <field> <value>`); the phone syncs them.

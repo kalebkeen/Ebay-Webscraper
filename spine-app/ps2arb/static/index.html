@@ -318,10 +318,11 @@ input::placeholder{color:var(--dim)}
   <div id="syncState" class="muted"></div>
 
   <p class="muted">
-    Your confirmed barcodes back up to the key server automatically. Losing or
+    Confirmed barcodes and photos back up to the key server automatically, and
+    anything captured offline is kept on this phone and retried later. Losing or
     resetting this phone won't lose the spines you've verified.
   </p>
-  <button class="btn" id="backupData">Back up scans now</button>
+  <button class="btn" id="backupData">Back up scans &amp; photos now</button>
   <div id="backupState" class="muted"></div>
 </details>
 
@@ -544,8 +545,12 @@ async function backupData(quiet){
     const r = await fetch('/api/vault/sync', {method:'POST'});
     const d = await r.json();
     if(!d.ok){ if(!quiet) $('#backupState').textContent = d.detail || 'Backup failed.'; return; }
-    $('#backupState').textContent = 'Backed up ' + (d.backed_up||0) +
+    let msg = 'Backed up ' + (d.backed_up||0) +
       ', restored ' + (d.pulled_into_local||0) + ' (vault has ' + (d.vault_total||0) + ').';
+    if(d.photos_synced || d.photos_pending)
+      msg += ' Photos: ' + (d.photos_synced||0) + ' synced'
+           + (d.photos_pending ? ', ' + d.photos_pending + ' waiting' : '') + '.';
+    $('#backupState').textContent = msg;
   }catch(e){ if(!quiet) $('#backupState').textContent = 'Backup failed: ' + e.message; }
 }
 $('#backupData').addEventListener('click', ()=>backupData(false));
