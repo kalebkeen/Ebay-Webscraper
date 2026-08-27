@@ -121,13 +121,19 @@ def _row(t) -> dict:
 def value(source, source_is_real: bool, *, title: str,
           variant: str = "unknown", completeness: str = "loose",
           region: str = "ntsc_u", ask: float | None = None,
-          ship_in: float = 0.0, local_pickup: bool = False) -> dict:
+          ship_in: float = 0.0, local_pickup: bool = False,
+          price_cache=None) -> dict:
     """Max bid plus the reasoning behind it.
 
     `local_pickup` is not cosmetic. Removing both shipping legs drops the
     structural floor from about $7.72 to near $1 — the single biggest lever
     in the model, and why in-person sourcing works where mail-order
     arbitrage does not.
+
+    `price_cache`, when given, is consulted before the live source: a SKU the
+    desktop already priced comes back instantly and offline, without a comp
+    API call (see pricecache.py). Only the resale estimate is cached; the
+    economics below still run per request off the live inputs.
     """
     entry = entry_for(title)
     if entry is None:
@@ -137,9 +143,21 @@ def value(source, source_is_real: bool, *, title: str,
     completeness_e = _enum(C, completeness, C.LOOSE)
     region_e = _enum(R, region, R.NTSC_U)
 
-    key = (f"{title}|{region_e.value}|{variant_e.value}"
-           f"|{completeness_e.value}|{local_pickup}")
+    sku = f"{title}|{region_e.value}|{variant_e.value}|{completeness_e.value}"
+    key = f"{sku}|{local_pickup}"
     cached = _cached(key)
+
+    # Precomputed estimate (desktop-priced from the real source) beats a live
+    # call. Its realness/cached-ness is stored INSIDE the dict so repeat hits
+    # off the in-memory cache stay consistent.
+    if cached is None and price_cache is not None:
+        row = price_cache.get(sku)
+        if row is not None:
+            row = dict(row)
+            row["_real"] = True          # came from the real desktop source
+            row["_cached"] = True
+            cached = row
+            _store(key, cached)
 
     if cached is None:
         val = comps.value_sku(
@@ -161,14 +179,21 @@ def value(source, source_is_real: bool, *, title: str,
                 "adjustments": val.adjustments[:4],
                 "warnings": val.warnings[:3],
             }
+        cached["_real"] = source_is_real
+        cached["_cached"] = False
         _store(key, cached)
 
     out = dict(cached)
+    real = out.pop("_real", source_is_real)
+    was_cached = out.pop("_cached", False)
+    cached_at = out.pop("cached_at", None)
     out.update(title=title, liquidity=entry.liquidity,
                repro_risk=entry.repro_risk,
                has_greatest_hits=entry.has_greatest_hits,
                priced_as_variant=variant_e.value,
-               source_is_mock=not source_is_real)
+               source_is_mock=not real, cached=was_cached)
+    if cached_at:
+        out["cached_at"] = cached_at
     if not out.get("quotable"):
         return out
 

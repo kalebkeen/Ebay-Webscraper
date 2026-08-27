@@ -12,5 +12,6 @@ __pycache__/
 **/catalog_override.json
 **/harvest.db
 **/spine_vault.db
+**/pricecache.db
 **/vault_photos/
 tools/liquidity_counts.json

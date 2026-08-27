@@ -37,6 +37,7 @@ _SCANDEX = None
 _EBAY = None
 _SETTINGS = None
 _OUTBOX = None
+_PRICE_CACHE = None
 _STATIC = Path(__file__).parent / "static"
 
 
@@ -198,6 +199,17 @@ def sync_vault() -> dict:
     except Exception as exc:                            # noqa: BLE001
         out["catalog_error"] = str(exc)
 
+    # Precomputed resale estimates — PULL ONLY. The desktop is the only place
+    # valuations are computed from real sources, so the phone never pushes;
+    # it just imports the newest rows and reads them on the next scan.
+    try:
+        if _PRICE_CACHE is not None:
+            rows = _get("/v1/vault/valuations").get("rows") or []
+            out["prices_synced"] = _PRICE_CACHE.import_rows(rows)
+            out["prices_total"] = _PRICE_CACHE.stats().get("skus", 0)
+    except Exception as exc:                            # noqa: BLE001
+        out["price_cache_error"] = str(exc)
+
     return out
 
 
@@ -266,7 +278,8 @@ def _startup_sync() -> None:
 def configure(source, source_is_real: bool = False, upc_index=None,
               static_dir: Path | None = None, scandex_client=None,
               settings_store=None) -> None:
-    global _SOURCE, _SOURCE_IS_REAL, _UPC, _STATIC, _SCANDEX, _SETTINGS, _OUTBOX
+    global _SOURCE, _SOURCE_IS_REAL, _UPC, _STATIC, _SCANDEX, _SETTINGS
+    global _OUTBOX, _PRICE_CACHE
     _SOURCE = source
     _SOURCE_IS_REAL = source_is_real
     _UPC = upc_index
@@ -274,15 +287,22 @@ def configure(source, source_is_real: bool = False, upc_index=None,
     _SETTINGS = settings_store
     if static_dir:
         _STATIC = Path(static_dir)
-    # The photo outbox lives beside the barcode index — the same app-private,
-    # writable directory — so confirmed photos survive an offline capture.
+    # The photo outbox and the price cache live beside the barcode index — the
+    # same app-private, writable directory — so both survive across launches.
+    base = (Path(getattr(_UPC, "path", "")).parent if _UPC is not None
+            else Path(__file__).parent)
     try:
         import photo_outbox
-        base = (Path(getattr(_UPC, "path", "")).parent if _UPC is not None
-                else Path(__file__).parent)
         _OUTBOX = photo_outbox.PhotoOutbox(base / "photo_outbox")
     except Exception:                                  # noqa: BLE001
         _OUTBOX = None
+    # Precomputed resale estimates pulled from the desktop (see pricecache.py).
+    # A missing/unbuilt cache just means every price is computed live.
+    try:
+        import pricecache
+        _PRICE_CACHE = pricecache.PriceCache(base / "pricecache.db")
+    except Exception:                                  # noqa: BLE001
+        _PRICE_CACHE = None
     if _SETTINGS is not None and scandex_client is None:
         rebuild_clients()
 
@@ -423,7 +443,8 @@ class Handler(BaseHTTPRequestHandler):
                     region=body.get("region", "ntsc_u"),
                     ask=body.get("ask"),
                     ship_in=float(body.get("ship_in") or 0.0),
-                    local_pickup=bool(body.get("local_pickup", False))))
+                    local_pickup=bool(body.get("local_pickup", False)),
+                    price_cache=_PRICE_CACHE))
 
             if route == "/api/assess":
                 return self._send(200, core.assess(
@@ -449,7 +470,8 @@ class Handler(BaseHTTPRequestHandler):
                 def _priced(out, title, variant):
                     try:
                         out["price"] = core.value(_SOURCE, _SOURCE_IS_REAL,
-                                                  title=title, variant=variant)
+                                                  title=title, variant=variant,
+                                                  price_cache=_PRICE_CACHE)
                     except core.ApiError as exc:
                         out["price_error"] = exc.detail
                     return out
@@ -537,7 +559,7 @@ class Handler(BaseHTTPRequestHandler):
                         try:
                             item["price"] = core.value(
                                 _SOURCE, _SOURCE_IS_REAL, title=r.title,
-                                variant=r.variant)
+                                variant=r.variant, price_cache=_PRICE_CACHE)
                         except core.ApiError as exc:
                             item["price_error"] = exc.detail
                     items.append(item)

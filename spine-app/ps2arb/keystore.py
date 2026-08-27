@@ -51,6 +51,24 @@ import vault as _vault
 HERE = Path(__file__).resolve().parent
 STORE_PATH = Path(os.environ.get("SPINE_KEYSTORE_STORE", HERE / "keystore.json"))
 TOKEN_PATH = HERE / "keystore_token.txt"
+# Precomputed resale estimates that precompute.py fills on this desktop; the
+# phone pulls them read-only. Same DB file precompute.py writes to.
+PRICECACHE_PATH = Path(os.environ.get("PS2ARB_PRICECACHE", HERE / "pricecache.db"))
+
+
+def _all_valuations() -> dict:
+    """Every precomputed estimate row, for the phone to pull. Opens the cache
+    per request so it always reflects the latest precompute run and never
+    holds a lock; a missing cache is simply an empty list."""
+    try:
+        import pricecache
+        pc = pricecache.PriceCache(PRICECACHE_PATH)
+        try:
+            return {"rows": pc.export_rows()}
+        finally:
+            pc.close()
+    except Exception as exc:                            # noqa: BLE001
+        return {"rows": [], "error": str(exc)}
 VERSION = "1.0"
 
 # Tailscale address ranges. In "open" mode the keystore serves token-free but
@@ -149,6 +167,7 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/vault/upc": lambda: {"entries": _vault.all_upc()},
             "/v1/vault/scandex": lambda: {"entries": _vault.all_scandex()},
             "/v1/vault/catalog": lambda: {"entries": _vault.all_catalog()},
+            "/v1/vault/valuations": _all_valuations,
             "/v1/vault/stats": _vault.stats,
         }
         if self.path in vault_gets:
