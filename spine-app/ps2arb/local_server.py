@@ -599,12 +599,16 @@ def start(port: int = 0, source=None, source_is_real: bool = False,
     blank WebView with nothing in the log to explain it.
     """
     if source is None:
-        import mock_sources as ms
         from datetime import date
         today = date(2026, 8, 22)
-        source = ms.CombinedSource(ms.MockMarketplace(seed=7, today=today),
-                                   ms.MockReference(today))
-        source_is_real = False
+        try:
+            import sources
+            source, source_is_real = sources.build_source(today=today)
+        except Exception:                              # noqa: BLE001
+            import mock_sources as ms
+            source = ms.CombinedSource(ms.MockMarketplace(seed=7, today=today),
+                                       ms.MockReference(today))
+            source_is_real = False
 
     if upc_index is None:
         try:

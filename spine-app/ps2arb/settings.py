@@ -33,6 +33,7 @@ FIELDS = {
     "ebay_client_id":     "EBAY_CLIENT_ID",
     "ebay_client_secret": "EBAY_CLIENT_SECRET",
     "pricecharting_token": "PRICECHARTING_TOKEN",
+    "soldcomps_token":    "SOLDCOMPS_TOKEN",
     # Photo identification (a scanned cover/spine -> title). vision_api_key is
     # a secret; provider/model/base_url are plain config with defaults in
     # identify.py. anthropic_api_key stays as a back-compat fallback key.
@@ -50,15 +51,16 @@ FIELDS = {
 
 # Never echoed back to the client in full.
 SECRET_FIELDS = {"scandex_token", "ebay_client_secret", "pricecharting_token",
-                 "vision_api_key", "anthropic_api_key", "keystore_token"}
+                 "soldcomps_token", "vision_api_key", "anthropic_api_key",
+                 "keystore_token"}
 
 # The durable service credentials/config the desktop keystore stores and
 # serves. A sync writes only these back into settings, so it can never clobber
 # the keystore_url / keystore_token the phone needs to reach the keystore.
 KEYSTORE_SERVED_FIELDS = {
     "scandex_token", "ebay_client_id", "ebay_client_secret",
-    "pricecharting_token", "vision_provider", "vision_api_key",
-    "vision_model", "vision_base_url", "anthropic_api_key",
+    "pricecharting_token", "soldcomps_token", "vision_provider",
+    "vision_api_key", "vision_model", "vision_base_url", "anthropic_api_key",
 }
 
 

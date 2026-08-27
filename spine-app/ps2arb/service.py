@@ -55,12 +55,17 @@ UPC = upc_mod.UpcIndex()
 # ---------------------------------------------------------------------------
 # Comp source
 # ---------------------------------------------------------------------------
-# SWAP THIS for a real adapter. It needs three methods -- sold_records,
-# active_listing_count, quote -- and everything downstream is source-agnostic.
-# Until then every number this service returns is synthetic.
-SOURCE = ms.CombinedSource(ms.MockMarketplace(seed=7, today=TODAY),
-                           ms.MockReference(TODAY))
-SOURCE_IS_REAL = False
+# Layers whatever real sources are configured (PriceCharting / SoldComps /
+# harvest) and falls back to the mock when none are, flagging SOURCE_IS_REAL
+# accordingly. Set the tokens on the desktop keystore (`keystore.py set
+# pricecharting_token ...` / `soldcomps_token ...`) to go live.
+try:
+    import sources as _sources
+    SOURCE, SOURCE_IS_REAL = _sources.build_source(today=TODAY)
+except Exception:                                      # noqa: BLE001
+    SOURCE = ms.CombinedSource(ms.MockMarketplace(seed=7, today=TODAY),
+                               ms.MockReference(TODAY))
+    SOURCE_IS_REAL = False
 
 
 # ---------------------------------------------------------------------------

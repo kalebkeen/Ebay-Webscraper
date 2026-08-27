@@ -39,26 +39,24 @@ def _static_dir() -> Path:
 
 
 def _build_source(data: Path):
-    """Real comps if configured, mock otherwise. Never silently mixed."""
+    """Real comps if configured, mock otherwise. Never silently mixed.
+
+    Delegates to sources.build_source, which layers whatever is configured:
+    SoldComps (individual sales + supply), PriceCharting (tier prices), and
+    the harvest store (sales inferred from vanished listings, once it holds
+    enough). Any one of them makes the source real; none leaves the mock in
+    place so the client keeps its synthetic-prices banner.
+    """
     from datetime import date
     today = date(2026, 8, 22)
-
-    client_id = os.environ.get("EBAY_CLIENT_ID", "")
-    if client_id:
-        try:
-            import store
-            harvest = store.HarvestStore(data / "harvest.db")
-            # Only trust the harvest once it has enough observed sales to
-            # price anything; before that it would return empty results that
-            # read as "no comps" rather than "not ready yet".
-            if harvest.stats().get("sold", 0) >= 20:
-                return harvest, True
-        except Exception as exc:                      # noqa: BLE001
-            print(f"harvest unavailable: {exc}", file=sys.stderr)
-
-    import mock_sources as ms
-    return (ms.CombinedSource(ms.MockMarketplace(seed=7, today=today),
-                              ms.MockReference(today)), False)
+    try:
+        import sources
+        return sources.build_source(data, today)
+    except Exception as exc:                          # noqa: BLE001
+        print(f"source build failed, using mock: {exc}", file=sys.stderr)
+        import mock_sources as ms
+        return (ms.CombinedSource(ms.MockMarketplace(seed=7, today=today),
+                                  ms.MockReference(today)), False)
 
 
 def start() -> int:
