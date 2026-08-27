@@ -34,7 +34,11 @@ ANTHROPIC_VERSION = "2023-06-01"
 # Google's OpenAI-compatible endpoint — lets the same code path serve Gemini
 # (free tier), and later a local Ollama or any other OpenAI-compatible host.
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
-DEFAULT_MODELS = {"anthropic": "claude-opus-5", "gemini": "gemini-2.0-flash"}
+# Use Gemini's rolling "-latest" alias, not a pinned version: Google retires
+# dated flash models (gemini-2.0-flash was retired by mid-2026, which 404'd
+# every scan). The alias keeps identify working across model turnover without an
+# APK rebuild; pin a specific model with `keystore.py set vision_model ...`.
+DEFAULT_MODELS = {"anthropic": "claude-opus-5", "gemini": "gemini-flash-latest"}
 
 _VARIANT_NOTE = (
     '"variant" is one of "black_label", "greatest_hits", or "unknown" — '
