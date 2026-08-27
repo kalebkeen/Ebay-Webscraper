@@ -37,9 +37,9 @@ anything that doesn't move toward real prices.
   (`C:\Users\kaleb\AppData\Local\Programs\Python\Python312\`), NOT 3.14 — torch
   has no 3.14 wheels. 3.14 still runs the keystore but falls back to dHash.
 - **Tests** are plain scripts: `python test_x.py` (exit code), no pytest.
-  Twelve suites: corpus, adversarial, comps, economics, backtest, keystore,
-  vault, identify, photo, outbox, sources, pricecache. Run all + the stdlib
-  guard before pushing.
+  Thirteen suites: corpus, adversarial, comps, economics, backtest, keystore,
+  vault, identify, photo, outbox, sources, pricecache, seed. Run all + the
+  stdlib guard before pushing.
 - Windows `python3` is a Store stub; use `/c/Python314/python` or the 3.12 path.
 - **Secrets:** Claude never enters API keys. The user sets them on the desktop
   keystore (`python keystore.py set <field> <value>`); the phone syncs them.
@@ -68,7 +68,8 @@ anything that doesn't move toward real prices.
 ## Module map (`spine-app/ps2arb/`)
 - **Identify:** `listing_parser`, `catalog` (+`catalog_data`), `fuzzy`,
   `sequel`, `pipeline`, `upc`, `scandex`, `identify` (photo/vision),
-  `ebay` (GTIN).
+  `ebay` (GTIN), `seed_covers` (desktop-only CLI: seeds the vault photo index
+  with libretro box art so known covers skip the vision call).
 - **Value:** `comps`, `sources` (layers real sources + `build_source`),
   `pricecharting`, `soldcomps`, `httpjson` (shared stdlib GET), `pricecache`
   (bundled; precomputed estimates the phone reads for instant/offline prices),
