@@ -117,6 +117,55 @@ def main() -> int:
         transport=fake(status=401, payload={"error": {"message": "bad"}}))
     check("shelf http error -> error", len(rows) == 1 and rows[0].status == "error")
 
+    # 10. Transient errors: friendly note, and _http retries before giving up.
+    check("503 note is friendly",
+          "503" in identify._status_note(503, {})
+          and "busy" in identify._status_note(503, {}).lower())
+    check("401 note keeps status",
+          "401" in identify._status_note(401, {"error": {"message": "nope"}}))
+
+    import io
+
+    class _Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"ok": true}'
+
+    def _err503():
+        return identify.urllib.error.HTTPError(
+            "http://x", 503, "busy", {},
+            io.BytesIO(b'{"error":{"message":"overloaded"}}'))
+
+    real = identify.urllib.request.urlopen
+    calls = {"n": 0}
+    def _flaky(req, timeout=None):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise _err503()
+        return _Resp()
+    identify.urllib.request.urlopen = _flaky
+    try:
+        status, payload = identify._http("POST", "http://x", {}, b"{}",
+                                         attempts=3, backoff=0)
+    finally:
+        identify.urllib.request.urlopen = real
+    check("retries transient 503 then succeeds",
+          status == 200 and calls["n"] == 3 and payload.get("ok") is True)
+
+    calls2 = {"n": 0}
+    def _always(req, timeout=None):
+        calls2["n"] += 1
+        raise _err503()
+    identify.urllib.request.urlopen = _always
+    try:
+        status, _ = identify._http("POST", "http://x", {}, b"{}",
+                                   attempts=3, backoff=0)
+    finally:
+        identify.urllib.request.urlopen = real
+    check("gives up after N tries on persistent 503",
+          status == 503 and calls2["n"] == 3)
+
     failures = [n for n, ok in CHECKS if not ok]
     print("-" * 72)
     for n, ok in CHECKS:

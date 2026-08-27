@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -79,21 +80,37 @@ class IdentifyResult:
         return self.status == "matched" and self.title is not None
 
 
+# Statuses worth another try: rate limits and the free tier's transient
+# "overloaded" errors (429 + 5xx). Gemini's free tier 503s under load fairly
+# often, and a single scan shouldn't fail because of a momentary blip.
+_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
 def _http(method: str, url: str, headers: dict, body: bytes,
-          timeout: float = 40.0):
-    req = urllib.request.Request(url, data=body, method=method)
-    for k, v in headers.items():
-        req.add_header(k, v)
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, json.loads(resp.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", "replace")
+          timeout: float = 40.0, *, attempts: int = 3, backoff: float = 1.0):
+    last = (0, {})
+    for i in range(attempts):
         try:
-            payload = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            payload = {"raw": raw[:300]}
-        return exc.code, payload
+            req = urllib.request.Request(url, data=body, method=method)
+            for k, v in headers.items():
+                req.add_header(k, v)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, json.loads(
+                    resp.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as exc:
+            raw = exc.read().decode("utf-8", "replace")
+            try:
+                payload = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                payload = {"raw": raw[:300]}
+            last = (exc.code, payload)
+            if exc.code not in _RETRY_STATUS or i == attempts - 1:
+                return exc.code, payload
+        except OSError:                       # connection error / timeout
+            if i == attempts - 1:
+                raise
+        time.sleep(backoff * (2 ** i))        # 1s, 2s between tries
+    return last
 
 
 def _extract_json(text: str) -> dict:
@@ -125,6 +142,18 @@ def _err_detail(payload) -> str:
     return ""
 
 
+def _status_note(status: int, payload) -> str:
+    """A human-readable note for a non-200 vision response. Keeps the numeric
+    status (useful for debugging) but explains the transient ones plainly."""
+    if status in (429, 503):
+        return (f"the photo service is busy right now ({status}) — "
+                "try again in a moment")
+    if status in (500, 502, 504):
+        return f"the photo service had a temporary error ({status}) — try again"
+    d = _err_detail(payload)
+    return f"identify service returned {status}" + (f": {d[:120]}" if d else "")
+
+
 def _call_anthropic(image_b64, media_type, prompt, api_key, model, transport):
     """Anthropic Messages API. Returns (model_text, error_note)."""
     body = json.dumps({
@@ -139,8 +168,7 @@ def _call_anthropic(image_b64, media_type, prompt, api_key, model, transport):
                "content-type": "application/json"}
     status, payload = transport("POST", ANTHROPIC_URL, headers, body)
     if status != 200:
-        d = _err_detail(payload)
-        return None, f"identify service returned {status}" + (f": {d[:120]}" if d else "")
+        return None, _status_note(status, payload)
     if payload.get("stop_reason") == "refusal":
         return None, "request was declined"
     text = "".join(b.get("text", "") for b in (payload.get("content") or [])
@@ -163,8 +191,7 @@ def _call_openai(image_b64, media_type, prompt, api_key, model, base_url, transp
                "content-type": "application/json"}
     status, payload = transport("POST", url, headers, body)
     if status != 200:
-        d = _err_detail(payload)
-        return None, f"identify service returned {status}" + (f": {d[:120]}" if d else "")
+        return None, _status_note(status, payload)
     choices = payload.get("choices") or []
     if not choices:
         return None, "identify service returned no content"
