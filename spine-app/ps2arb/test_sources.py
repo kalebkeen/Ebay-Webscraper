@@ -10,6 +10,7 @@ the since-window, and the LayeredSource merge semantics. No token, no HTTP.
 from __future__ import annotations
 
 import json
+import os
 from datetime import date
 from types import SimpleNamespace
 
@@ -270,11 +271,33 @@ def test_build_source_fallback():
           isinstance(src2, sources.LayeredSource))
 
 
+def test_build_source_uninjected_uses_resolve():
+    """The real run injects no settings; it MUST resolve credentials via
+    settings.resolve (which reads the keystore store), not a bare Settings()
+    that only sees settings.json. Regression: build_source once fell back to
+    Settings() and silently missed keystore-set tokens."""
+    import settings as _s
+    saved = _s.resolve
+    _s.resolve = lambda field: "sc_fromkeystore" if field == "soldcomps_token" else ""
+    saved_env = os.environ.pop("SOLDCOMPS_TOKEN", None)
+    try:
+        src, is_real = sources.build_source(today=date(2026, 8, 22))
+        check("uninjected build_source goes real via resolve", is_real is True)
+        check("uninjected build wired the soldcomps source",
+              isinstance(src, sources.LayeredSource)
+              and any(getattr(s, "name", "") == "soldcomps" for s in src.sources))
+    finally:
+        _s.resolve = saved
+        if saved_env is not None:
+            os.environ["SOLDCOMPS_TOKEN"] = saved_env
+
+
 def main() -> int:
     test_pricecharting()
     test_soldcomps()
     test_layered()
     test_build_source_fallback()
+    test_build_source_uninjected_uses_resolve()
 
     failures = [n for n, ok in CHECKS if not ok]
     print("-" * 72)

@@ -91,11 +91,15 @@ def build_source(data_dir=None, today: date | None = None, *,
     missing optional module drops that one source, never the whole app.
     """
     today = today or date.today()
-    settings = settings or _load_settings()
+    # An explicitly INJECTED settings object (tests) is authoritative and read
+    # directly. For a real run (nothing injected) we must NOT fall back to a
+    # bare Settings() -- that reads only settings.json, which on the desktop is
+    # empty, and would miss tokens set with `keystore.py set`. Use resolve()
+    # instead, which also consults the keystore store.
+    injected = settings is not None
 
     def cred(field: str) -> str:
-        # An explicitly injected settings object (tests) is authoritative.
-        if settings is not None:
+        if injected:
             try:
                 v = (settings.get(field) or "").strip()
                 if v:
@@ -103,8 +107,6 @@ def build_source(data_dir=None, today: date | None = None, *,
             except Exception:
                 pass
             return (os.environ.get(field.upper(), "") or "").strip()
-        # Real run: resolve across the settings store, the desktop keystore
-        # store, and the environment, so `keystore.py set <token>` is honoured.
         try:
             import settings as _s
             return (_s.resolve(field) or "").strip()
@@ -153,11 +155,3 @@ def build_source(data_dir=None, today: date | None = None, *,
     import mock_sources as ms
     return (ms.CombinedSource(ms.MockMarketplace(seed=7, today=today),
                               ms.MockReference(today)), False)
-
-
-def _load_settings():
-    try:
-        import settings as _settings
-        return _settings.Settings()
-    except Exception:
-        return None
