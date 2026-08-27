@@ -78,6 +78,19 @@ h1{
   padding:6px 11px;font-size:12px;cursor:pointer;
 }
 .scan.off .scan-stop{display:none}
+/* Live cover/spine capture: a shutter button + a portrait guide, shown only
+   while capturing (the barcode reticle is hidden then). */
+.scan-capture{
+  position:absolute;left:50%;bottom:12px;transform:translateX(-50%);
+  background:#5b6ee1;border:1px solid rgba(255,255,255,.25);color:#fff;
+  border-radius:999px;padding:11px 24px;font-size:14px;font-weight:600;
+  cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.35);
+}
+.scan:not(.capturing) .scan-capture{display:none}
+.scan.capturing .reticle{display:none}
+.cap-guide{position:absolute;inset:8% 22%;border:2px dashed rgba(255,255,255,.5);
+  border-radius:8px;pointer-events:none}
+.scan:not(.capturing) .cap-guide{display:none}
 
 /* ---- search ---- */
 .field{position:relative;margin-bottom:12px}
@@ -249,14 +262,18 @@ input::placeholder{color:var(--dim)}
   </button>
   <video id="video" playsinline muted></video>
   <div class="reticle"></div>
+  <div class="cap-guide"></div>
   <button class="scan-stop" id="scanStop">Stop</button>
+  <button class="scan-capture" id="scanCapture" type="button">Capture</button>
 </div>
 
 <div class="field">
   <input type="file" id="photo" accept="image/*" hidden>
   <input type="file" id="shelf" accept="image/*" hidden>
-  <button class="btn ghost" id="photoBtn">Identify from a photo</button>
-  <button class="btn ghost" id="shelfBtn">Identify a shelf (multiple)</button>
+  <button class="btn" id="coverScanBtn">Scan a cover</button>
+  <button class="btn" id="shelfScanBtn">Scan a shelf</button>
+  <button class="btn ghost" id="photoBtn">Cover from a photo</button>
+  <button class="btn ghost" id="shelfBtn">Shelf from a photo</button>
   <div id="photoState" class="muted"></div>
   <div id="photoResult"></div>
 </div>
@@ -657,6 +674,28 @@ backupData(true);
     sInput.value = '';
   });
 
+  // Shared with the live-camera capture below: a captured frame (already a
+  // base64 JPEG) goes through the same identify + render + confirm path as a
+  // picked photo, so covers scanned in-app behave exactly like uploaded ones.
+  window.__identifyCover = async function(b64){
+    lastImage = b64; out.innerHTML = ''; state.textContent = 'Identifying…';
+    try{
+      const r = await fetch('/api/identify', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({image: b64, media_type: 'image/jpeg'})});
+      render(await r.json());
+    }catch(e){ state.textContent = 'Could not identify: ' + e.message; }
+  };
+  window.__identifyShelf = async function(b64){
+    out.innerHTML = ''; state.textContent = 'Identifying games…';
+    try{
+      const r = await fetch('/api/identify/shelf', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({image: b64, media_type: 'image/jpeg'})});
+      renderShelf(((await r.json()).results) || []);
+    }catch(e){ state.textContent = 'Could not identify: ' + e.message; }
+  };
+
   function renderShelf(list){
     if(list.length === 1 && list[0].status === 'error'){ state.textContent = list[0].note || 'Identify unavailable.'; return; }
     const matched = list.filter(x => x.status === 'matched');
@@ -724,10 +763,58 @@ function setChip(group, v){
 
 /* ------------------------------------------------------------------ */
 /* barcode                                                             */
-let stream = null, detector = null, raf = null;
+let stream = null, detector = null, raf = null, captureMode = null;
 
 $('#scanStart').addEventListener('click', startScan);
 $('#scanStop').addEventListener('click', stopScan);
+$('#coverScanBtn').addEventListener('click', ()=> startCoverScan('cover'));
+$('#shelfScanBtn').addEventListener('click', ()=> startCoverScan('shelf'));
+$('#scanCapture').addEventListener('click', captureFrame);
+
+/* Live cover/spine capture. The barcode scanner uses the native ML Kit
+   scanner (SpineNative); this instead opens the WebView's own camera via
+   getUserMedia -- which the app grants -- shows a live preview, and on tap
+   grabs the frame and sends it down the same identify path as a picked photo.
+   No barcode detection here; the user is aiming at box art, not a barcode. */
+async function startCoverScan(mode){
+  if(!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)){
+    note('This device has no camera access here. Use “from a photo” instead.');
+    return;
+  }
+  stopScan();                                   // release any active stream
+  captureMode = mode;
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'environment',
+             width:{ideal:1920}, height:{ideal:1080}}});
+    $('#video').srcObject = stream;
+    await $('#video').play();
+    $('#scanCapture').textContent = mode === 'shelf' ? 'Capture shelf'
+                                                     : 'Capture cover';
+    const scan = $('#scan');
+    scan.classList.remove('off');
+    scan.classList.add('on', 'capturing');
+  }catch(err){
+    captureMode = null;
+    note('Camera unavailable: ' + err.message + '. Use “from a photo” instead.');
+  }
+}
+
+function captureFrame(){
+  const v = $('#video');
+  if(!stream || !v.videoWidth){ return; }
+  const mode = captureMode;
+  const maxDim = mode === 'shelf' ? 1400 : 1280;
+  const s = Math.min(1, maxDim / Math.max(v.videoWidth, v.videoHeight));
+  const c = document.createElement('canvas');
+  c.width = Math.round(v.videoWidth * s);
+  c.height = Math.round(v.videoHeight * s);
+  c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+  const b64 = c.toDataURL('image/jpeg', 0.8).split(',', 2)[1];
+  if(navigator.vibrate) navigator.vibrate(30);
+  stopScan();                                   // free the camera before the call
+  (mode === 'shelf' ? window.__identifyShelf : window.__identifyCover)(b64);
+}
 
 /* Native scanner, when running inside the APK.
    BarcodeDetector is a Chrome API and is NOT reliably exposed in Android's
@@ -747,6 +834,7 @@ function nativeScan(){
 }
 
 async function startScan(){
+  stopScan();                    // release a live cover stream first, if any
   if(window.SpineNative && window.SpineNative.isAvailable &&
      window.SpineNative.isAvailable()){
     try {
@@ -779,8 +867,9 @@ async function startScan(){
 function stopScan(){
   cancelAnimationFrame(raf);
   if(stream) stream.getTracks().forEach(t=>t.stop());
-  stream = null;
-  $('#scan').classList.add('off'); $('#scan').classList.remove('on');
+  stream = null; captureMode = null;
+  $('#scan').classList.add('off');
+  $('#scan').classList.remove('on', 'capturing');
 }
 
 async function tick(){
