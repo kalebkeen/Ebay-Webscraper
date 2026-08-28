@@ -441,3 +441,15 @@ def stats() -> dict:
             "photos": photos, "photo_index": _HAVE_PIL,
             "photo_match": "clip" if _HAVE_CLIP else "dhash",
             "db": str(DB_PATH)}
+
+
+def photo_titles() -> set:
+    """The set of titles that already have a cover in the photo index. Lets
+    seed_covers skip them so a campaign resumes on new titles only. Plain SQL,
+    so it works even without Pillow."""
+    conn = _conn()
+    try:
+        return {r["title"] for r in conn.execute(
+            "SELECT DISTINCT title FROM photo_index")}
+    finally:
+        conn.close()

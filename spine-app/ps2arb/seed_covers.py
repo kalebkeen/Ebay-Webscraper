@@ -55,6 +55,7 @@ import base64
 import datetime
 import difflib
 import html.parser
+import json
 import os
 import re
 import time
@@ -62,6 +63,7 @@ import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 import catalog
 import httpjson
@@ -437,7 +439,8 @@ class TheGamesDBCovers:
     """
 
     def __init__(self, api_key: str | None = None, opener=None, *,
-                 face: str = "front"):
+                 face: str = "front", cache_path=None,
+                 cache_ttl_hours: float = 24.0, refresh: bool = False):
         self._key = api_key if api_key is not None else _credential("thegamesdb_token")
         self._opener = opener
         self.face = face
@@ -447,6 +450,12 @@ class TheGamesDBCovers:
         self.remaining = None                    # None until the API tells us
         self.loaded = False
         self.last_status = 0
+        self.index_from_cache = False
+        # The platform listing is ~187 API pages; caching it to disk means a
+        # multi-run campaign pays that once, not every run.
+        self._cache_path = Path(cache_path) if cache_path else None
+        self._cache_ttl = cache_ttl_hours * 3600.0
+        self._refresh = refresh
 
     # -- transport ---------------------------------------------------------
 
@@ -476,11 +485,18 @@ class TheGamesDBCovers:
 
     # -- index -------------------------------------------------------------
 
-    def load(self, max_pages: int = 200) -> int:
-        """Page through the PS2 platform listing, indexing title -> game id."""
+    def load(self, max_pages: int = 400) -> int:
+        """Page through the PS2 platform listing, indexing title -> game id.
+
+        Reuses a fresh on-disk cache of the index when present (0 API calls),
+        so only the FIRST run of a campaign pays the ~187-page walk. A partial
+        walk (allowance ran out mid-listing) is used for this run but never
+        cached, so a truncated index can't stick."""
         if not self._key:
             return 0
-        page = 1
+        if not self._refresh and self._load_cached_index():
+            return len(self.by_key)
+        page, complete = 1, False
         while page <= max_pages:
             data = self._api("Games/ByPlatformID", {
                 "id": TGDB_PS2_PLATFORM,
@@ -491,6 +507,7 @@ class TheGamesDBCovers:
                 break
             games = data.get("games") or []
             if not games:
+                complete = True
                 break
             for game in games:
                 title, gid = game.get("game_title"), game.get("id")
@@ -499,11 +516,46 @@ class TheGamesDBCovers:
                 key = _norm(str(title))
                 if key:
                     self.by_key.setdefault(key, int(gid))
-            if len(games) < _TGDB_PAGE_SIZE or self.exhausted():
+            if len(games) < _TGDB_PAGE_SIZE:
+                complete = True
                 break
+            if self.exhausted():
+                break                            # partial index; do not cache
             page += 1
         self.loaded = bool(self.by_key)
+        if complete and self.by_key:
+            self._write_cached_index()
         return len(self.by_key)
+
+    def _load_cached_index(self) -> bool:
+        if self._cache_path is None or not self._cache_path.exists():
+            return False
+        try:
+            if time.time() - self._cache_path.stat().st_mtime > self._cache_ttl:
+                return False
+            data = json.loads(self._cache_path.read_text(encoding="utf-8"))
+            by_key = data.get("by_key") or {}
+            if not by_key:
+                return False
+            self.by_key = {k: int(v) for k, v in by_key.items()}
+            self.loaded = True
+            self.index_from_cache = True
+            return True
+        except Exception:                                   # noqa: BLE001
+            return False
+
+    def _write_cached_index(self) -> None:
+        if self._cache_path is None:
+            return
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            self._cache_path.write_text(json.dumps({
+                "cached_at": datetime.datetime.now(
+                    datetime.timezone.utc).isoformat(timespec="seconds"),
+                "platform": TGDB_PS2_PLATFORM,
+                "by_key": self.by_key}), encoding="utf-8")
+        except Exception:                                   # noqa: BLE001
+            pass
 
     def _game_id(self, title: str) -> int | None:
         key = _norm(title)
@@ -586,7 +638,8 @@ class TheGamesDBCovers:
                 "remaining": self.remaining}
 
 
-def build_source(name: str, *, face: str = "front", opener=None):
+def build_source(name: str, *, face: str = "front", opener=None,
+                 cache_path=None, refresh: bool = False):
     """Construct a cover source by name. Unknown names raise, so a typo on the
     command line fails loudly rather than silently seeding from the default."""
     if name == "libretro":
@@ -594,7 +647,8 @@ def build_source(name: str, *, face: str = "front", opener=None):
     if name == "coverproject":
         return CoverProjectCovers(opener=opener, face=face)
     if name == "thegamesdb":
-        return TheGamesDBCovers(opener=opener, face=face)
+        return TheGamesDBCovers(opener=opener, face=face,
+                                cache_path=cache_path, refresh=refresh)
     raise ValueError(f"unknown source: {name}")
 
 
@@ -604,14 +658,22 @@ def _default_add_photo(image_b64: str, title: str, variant: str):
 
 
 def run(covers, titles, *, add_photo=None, variant: str = "unknown",
-        delay: float = 0.5, dry_run: bool = False, log=print) -> dict:
-    """Seed each title's boxart into the photo index. Returns a summary."""
+        delay: float = 0.5, dry_run: bool = False, skip=None, log=print) -> dict:
+    """Seed each title's boxart into the photo index. Returns a summary.
+
+    `skip` is a set of titles already covered; they are passed over BEFORE any
+    lookup, so a metered source (TheGamesDB) never spends a call re-fetching a
+    cover it already has."""
     add_photo = add_photo or _default_add_photo
+    skip = skip or set()
     if not covers.loaded and covers.load() == 0:
         return {"error": "could not load the boxart index"}
 
-    seeded = missing = failed = 0
+    seeded = missing = failed = skipped = 0
     for title in titles:
+        if title in skip:
+            skipped += 1
+            continue
         filename = covers.best_filename(title)
         if not filename:
             missing += 1
@@ -636,10 +698,12 @@ def run(covers, titles, *, add_photo=None, variant: str = "unknown",
             log(f"  add_photo refused {title}: {res.get('detail')}")
         if delay:
             time.sleep(delay)
-    return {"seeded": seeded, "missing": missing, "failed": failed}
+    return {"seeded": seeded, "missing": missing, "failed": failed,
+            "skipped": skipped}
 
 
-def _select(args) -> list:
+def _select(args, skip=None) -> list:
+    skip = skip or set()
     titles = list(args.title or [])
     if args.titles_file:
         with open(args.titles_file, encoding="utf-8") as fh:
@@ -648,9 +712,21 @@ def _select(args) -> list:
     pool.sort(key=lambda t: t.canonical)
     if not titles:
         titles = [t.canonical for t in pool]
+    # Drop already-covered titles BEFORE --limit, so `--limit N` picks N NEW
+    # titles to seed rather than re-checking ones already done.
+    titles = [t for t in titles if t not in skip]
     if args.limit:
         titles = titles[:args.limit]
     return titles
+
+
+def _covered_titles() -> set:
+    """Titles already in the photo index, so a campaign resumes on new ones."""
+    try:
+        import vault
+        return set(vault.photo_titles())
+    except Exception:                                       # noqa: BLE001
+        return set()
 
 
 def main() -> int:
@@ -680,6 +756,12 @@ def main() -> int:
     ap.add_argument("--anytime", action="store_true",
                     help="coverproject only: run a batch outside their "
                          "requested 02:00-06:00 UTC window")
+    ap.add_argument("--reseed", action="store_true",
+                    help="re-seed titles that already have a cover (default "
+                         "skips them so a campaign resumes on new titles)")
+    ap.add_argument("--refresh-index", action="store_true",
+                    help="thegamesdb only: re-page the platform listing "
+                         "instead of using the cached index on disk")
     args = ap.parse_args()
 
     if args.stats:
@@ -704,7 +786,15 @@ def main() -> int:
               "--limit. (Kept explicit so a stray run doesn't hammer the CDN.)")
         return 0
 
-    titles = _select(args)
+    # Already-covered titles are skipped so a big campaign resumes on new ones
+    # (and never spends a metered call re-fetching a cover it has). --reseed
+    # opts out.
+    covered = set() if args.reseed else _covered_titles()
+    titles = _select(args, skip=covered)
+    if not titles:
+        print(f"Nothing new to seed — every title in scope already has a cover "
+              f"({len(covered)} covered). Use --reseed to re-fetch.")
+        return 0
 
     if args.source == "coverproject" and not args.dry_run:
         # Their terms ask that batch runs sit in an off-peak window. A single
@@ -720,11 +810,17 @@ def main() -> int:
         print(f"  rate limit: 1 req / {_CP_MIN_INTERVAL:g}s, single-threaded "
               f"-> ~{est / 60:.0f} min for {len(titles)} title(s).")
 
-    covers = build_source(args.source, face=args.face)
+    # TheGamesDB's platform index is cached to disk (env override or beside
+    # this module) so a multi-run campaign pays the ~187-page walk once.
+    tgdb_cache = os.environ.get(
+        "PS2ARB_TGDB_CACHE", str(Path(__file__).parent / "tgdb_ps2_index.json"))
+    covers = build_source(args.source, face=args.face, cache_path=tgdb_cache,
+                          refresh=args.refresh_index)
     label = {"libretro": REPO,
              "coverproject": "thecoverproject.net (PS2)",
              "thegamesdb": "TheGamesDB (PS2)"}[args.source]
-    print(f"loading cover index for {label} ...")
+    print(f"loading cover index for {label} "
+          f"({len(covered)} titles already covered, skipped) ...")
     n = covers.load()
     if not n:
         print("could not load the cover index (network?). Aborting.")
@@ -734,14 +830,18 @@ def main() -> int:
             print("  No thegamesdb_token is set. On the desktop:\n"
                   "    python keystore.py set thegamesdb_token <key>")
         return 1
+    if getattr(covers, "index_from_cache", False):
+        print("  index served from the on-disk cache (no API calls)")
     if args.source == "thegamesdb" and covers.remaining is not None:
         print(f"  allowance remaining: {covers.remaining}")
-    print(f"  {n} covers indexed; seeding {len(titles)} title(s) "
+    print(f"  {n} covers indexed; seeding {len(titles)} new title(s) "
           f"{'(dry run)' if args.dry_run else ''} ...")
     # coverproject enforces its own floor inside _get; --delay only pads it.
     summary = run(covers, titles, variant=args.variant, delay=args.delay,
                   dry_run=args.dry_run)
     print(summary)
+    if args.source == "thegamesdb" and covers.remaining is not None:
+        print(f"  allowance remaining after run: {covers.remaining}")
     return 0
 
 

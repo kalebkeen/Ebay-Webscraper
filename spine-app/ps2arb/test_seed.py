@@ -446,6 +446,55 @@ def test_tgdb_seed_loop():
                      seed_covers.TheGamesDBCovers))
 
 
+def test_tgdb_index_cache():
+    import tempfile
+    import pathlib
+    with tempfile.TemporaryDirectory() as d:
+        cache = str(pathlib.Path(d) / "idx.json")
+        r1 = TGDBRouter()
+        c1 = seed_covers.TheGamesDBCovers(api_key="k", opener=r1, cache_path=cache)
+        n1 = c1.load()
+        check("first load pages the api", n1 == 3
+              and any("ByPlatformID" in u for u in r1.urls))
+        check("first load writes the index cache", pathlib.Path(cache).exists())
+
+        # A fresh source over the same cache must NOT hit the API to load.
+        r2 = TGDBRouter()
+        c2 = seed_covers.TheGamesDBCovers(api_key="k", opener=r2, cache_path=cache)
+        n2 = c2.load()
+        check("cached load serves the index without api calls",
+              n2 == 3 and c2.index_from_cache
+              and not any("ByPlatformID" in u for u in r2.urls))
+        check("cached load still resolves a title", c2._game_id("Ico") == 101)
+
+        # --refresh forces a re-page even with a warm cache.
+        r3 = TGDBRouter()
+        c3 = seed_covers.TheGamesDBCovers(api_key="k", opener=r3, cache_path=cache,
+                                          refresh=True)
+        c3.load()
+        check("--refresh re-pages the api despite the cache",
+              any("ByPlatformID" in u for u in r3.urls)
+              and not c3.index_from_cache)
+
+
+def test_seed_skip_covered():
+    # run(skip=...) must pass over covered titles WITHOUT a lookup, so a metered
+    # source never spends a call re-fetching a cover it already has.
+    calls = []
+    c = _tgdb(TGDBRouter())
+    orig = c.best_filename
+    c.best_filename = lambda t: (calls.append(t), orig(t))[1]
+    captured = []
+    summary = seed_covers.run(
+        c, ["Ico", "Okami"], skip={"Ico"},
+        add_photo=lambda b, t, v: (captured.append(t),
+                                   {"ok": True, "stored": True})[1],
+        delay=0, log=lambda *_: None)
+    check("run skips the covered title", summary.get("skipped") == 1)
+    check("run seeds only the new title", set(captured) == {"Okami"})
+    check("no lookup is spent on the skipped title", "Ico" not in calls)
+
+
 def main() -> int:
     test_matching()
     test_seed_loop()
@@ -454,6 +503,8 @@ def main() -> int:
     test_tgdb_faces()
     test_tgdb_allowance_and_key()
     test_tgdb_seed_loop()
+    test_tgdb_index_cache()
+    test_seed_skip_covered()
     test_coverproject_index()
     test_coverproject_face_selection()
     test_coverproject_limits()

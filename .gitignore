@@ -14,5 +14,6 @@ __pycache__/
 **/spine_vault.db
 **/pricecache.db
 **/outcomes.db
+**/tgdb_ps2_index.json
 **/vault_photos/
 tools/liquidity_counts.json
