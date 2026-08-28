@@ -477,6 +477,42 @@ def test_tgdb_index_cache():
               and not c3.index_from_cache)
 
 
+class _FailImagesRouter(TGDBRouter):
+    """ByPlatformID succeeds (index loads); every Games/Images 403s, to drive
+    the consecutive-failure circuit breaker."""
+    def __call__(self, req, timeout=None):
+        url = req.full_url
+        self.urls.append(url)
+        if "ByPlatformID" in url:
+            return _Resp({"code": 200,
+                          "data": {"count": len(TGDB_GAMES), "games": TGDB_GAMES},
+                          "remaining_monthly_allowance": self.allowance})
+        raise urllib.error.HTTPError(url, 403, "forbidden", {}, None)
+
+
+def test_tgdb_circuit_breaker():
+    c = seed_covers.TheGamesDBCovers(api_key="k", opener=_FailImagesRouter())
+    check("not exhausted to start", not c.exhausted())
+    for _ in range(seed_covers._MAX_API_FAILS):
+        c._api("Games/Images", {"games_id": 1})
+    check("breaker trips after a run of failed calls", c.exhausted())
+    # A successful call clears the streak (allowance still positive).
+    c._api("Games/ByPlatformID", {"id": seed_covers.TGDB_PS2_PLATFORM, "page": 1})
+    check("a successful call clears the breaker", not c.exhausted())
+
+    # run() bails as soon as the source reports exhausted, rather than grinding.
+    c2 = seed_covers.TheGamesDBCovers(api_key="k", opener=_FailImagesRouter())
+    c2._api_fails = seed_covers._MAX_API_FAILS       # pre-tripped
+    c2.by_key = {"ico": 101}
+    c2.loaded = True
+    seen = []
+    orig = c2.best_filename
+    c2.best_filename = lambda t: (seen.append(t), orig(t))[1]
+    seed_covers.run(c2, ["Ico", "Okami", "Katamari Damacy"],
+                    add_photo=lambda *a: {"ok": True}, delay=0, log=lambda *_: None)
+    check("run makes no lookups once the source is exhausted", seen == [])
+
+
 def test_seed_skip_covered():
     # run(skip=...) must pass over covered titles WITHOUT a lookup, so a metered
     # source never spends a call re-fetching a cover it already has.
@@ -504,6 +540,7 @@ def main() -> int:
     test_tgdb_allowance_and_key()
     test_tgdb_seed_loop()
     test_tgdb_index_cache()
+    test_tgdb_circuit_breaker()
     test_seed_skip_covered()
     test_coverproject_index()
     test_coverproject_face_selection()

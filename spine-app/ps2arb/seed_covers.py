@@ -410,6 +410,11 @@ class CoverProjectCovers:
 TGDB_API = "https://api.thegamesdb.net/v1"
 TGDB_PS2_PLATFORM = 11               # Sony PlayStation 2.
 _TGDB_PAGE_SIZE = 20                 # games per ByPlatformID page.
+# Consecutive API failures after which we assume quota-exhausted-or-down and
+# stop, rather than hammer the endpoint for the rest of a full-catalog sweep.
+# Matters for the unattended monthly task: it may fire before the allowance
+# resets, and a dead key must not turn into thousands of over-quota requests.
+_MAX_API_FAILS = 5
 
 
 def _credential(field: str) -> str:
@@ -452,6 +457,7 @@ class TheGamesDBCovers:
         self.loaded = False
         self.last_status = 0
         self.index_from_cache = False
+        self._api_fails = 0                      # consecutive failed calls
         # The platform listing is ~187 API pages; caching it to disk means a
         # multi-run campaign pays that once, not every run.
         self._cache_path = Path(cache_path) if cache_path else None
@@ -470,7 +476,9 @@ class TheGamesDBCovers:
         status, payload = httpjson.get_json(url, **kwargs)
         self.last_status = status
         if status != 200 or not isinstance(payload, dict):
+            self._api_fails += 1
             return None
+        self._api_fails = 0
         # Every response reports what is left; track it so a batch can stop
         # itself instead of hammering an exhausted key.
         if "remaining_monthly_allowance" in payload:
@@ -482,7 +490,12 @@ class TheGamesDBCovers:
         return data if isinstance(data, dict) else None
 
     def exhausted(self) -> bool:
-        return self.remaining is not None and self.remaining <= 0
+        """True once the allowance is spent, OR after a run of failed calls
+        (quota exceeded / key revoked / API down) so a sweep gives up instead
+        of hammering the endpoint."""
+        if self.remaining is not None and self.remaining <= 0:
+            return True
+        return self._api_fails >= _MAX_API_FAILS
 
     # -- index -------------------------------------------------------------
 
@@ -670,11 +683,17 @@ def run(covers, titles, *, add_photo=None, variant: str = "unknown",
     if not covers.loaded and covers.load() == 0:
         return {"error": "could not load the boxart index"}
 
+    exhausted = getattr(covers, "exhausted", None)
     seeded = missing = failed = skipped = 0
     for title in titles:
         if title in skip:
             skipped += 1
             continue
+        # A metered source that has run out (allowance spent, or a run of API
+        # failures) stops the sweep instead of grinding through the long tail.
+        if exhausted is not None and exhausted():
+            log("  stopping: source allowance exhausted / unavailable")
+            break
         filename = covers.best_filename(title)
         if not filename:
             missing += 1
