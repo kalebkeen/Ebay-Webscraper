@@ -92,6 +92,15 @@ h1{
   border-radius:8px;pointer-events:none}
 .scan:not(.capturing) .cap-guide{display:none}
 
+/* ---- outcome logging (buy / open flips) ---- */
+.bought{display:flex;gap:8px;margin-top:10px}
+.bought input,.flip-sell input{
+  flex:0 0 100px;background:var(--slate);border:1px solid var(--edge);
+  color:var(--paper);border-radius:8px;padding:8px 10px;font-size:14px}
+.flip{display:flex;flex-direction:column;gap:6px;padding:8px 0}
+.flip + .flip{border-top:1px solid var(--edge)}
+.flip-sell{display:flex;gap:8px}
+
 /* ---- search ---- */
 .field{position:relative;margin-bottom:12px}
 input[type=text],input[type=number]{
@@ -285,6 +294,7 @@ input::placeholder{color:var(--dim)}
 </div>
 
 <div id="teach"></div>
+<div id="flips"></div>
 
 <details id="setup" class="setup">
   <summary>Barcode lookup &amp; API keys</summary>
@@ -977,6 +987,7 @@ function offerTeach(code, title){
 /* ------------------------------------------------------------------ */
 /* valuation                                                           */
 let valTimer;
+let lastVal = null;
 function value(){
   if(!state.title) return;
   clearTimeout(valTimer);
@@ -1015,6 +1026,7 @@ function render(d){
     return;
   }
 
+  lastVal = d;                 // remembered so "I bought this" can log it
   const bid = d.max_bid || 0;
   const hasAsk = d.ask != null;
   const take = hasAsk ? d.take : bid > 0;
@@ -1033,6 +1045,9 @@ function render(d){
   }
 
   const notes = [];
+  if(d.needs_verify)
+    notes.push(['warn','Verify before paying — comps for this game disagree; '
+                     + 'confirm the exact variant and condition against the listing.']);
   if(d.repro_risk === 'high')
     notes.push(['warn','High-fake title. Check the disc face and hub codes '
                      + 'before you hand over money.']);
@@ -1064,7 +1079,77 @@ function render(d){
       ).join('')}</div>
       ${notes.length ? `<div class="notes">${notes.map(([c,t])=>
         `<div class="note ${c}">${esc(t)}</div>`).join('')}</div>` : ''}
+      <div class="bought">
+        <input type="number" inputmode="decimal" id="paidIn" placeholder="paid $"
+               value="${hasAsk ? Number(d.ask).toFixed(2) : ''}">
+        <button class="btn ghost" id="boughtBtn">I bought this</button>
+      </div>
     </div>`;
+  const bb = $('#boughtBtn');
+  if(bb) bb.addEventListener('click', ()=>{
+    const paid = parseFloat($('#paidIn').value);
+    if(!(paid >= 0)){ $('#paidIn').focus(); return; }
+    logBought(paid);
+  });
+}
+
+async function logBought(paid){
+  if(!lastVal) return;
+  try{
+    await fetch('/api/outcome/buy', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        title: lastVal.title, variant: lastVal.priced_as_variant,
+        completeness: state.completeness, region: 'ntsc_u',
+        paid: paid, ask: (lastVal.ask != null ? lastVal.ask : 0),
+        prediction: {
+          expected_resale: lastVal.expected_resale,
+          conservative_resale: lastVal.conservative_resale,
+          max_bid: lastVal.max_bid, confidence: lastVal.confidence,
+          days_to_sell: lastVal.days_to_sell}})});
+    loadFlips();
+  }catch(e){ note('Could not log the purchase: ' + e.message); }
+}
+
+/* ---- open flips: mark them sold to build the calibration record ---- */
+async function loadFlips(){
+  try{
+    const d = await (await fetch('/api/outcomes')).json();
+    renderFlips(d.open || [], d.stats || {});
+  }catch(e){ /* offline is fine; the log is local */ }
+}
+
+function renderFlips(open, stats){
+  const el = $('#flips');
+  if(!el) return;
+  if(!open.length && !(stats.sold)){ el.innerHTML = ''; return; }
+  let html = '<div class="teach"><p><b>Your flips</b>';
+  if(stats.sold)
+    html += ` <span class="muted">· ${stats.sold} sold, `
+          + `${money(stats.realized_profit||0)} profit</span>`;
+  html += '</p>';
+  for(const f of open){
+    html += `<div class="flip" data-id="${esc(f.id)}">
+      <div>${esc(f.title)} <span class="muted">· paid ${money(f.paid||0)}`
+      + (f.pred_conservative!=null ? ` · est resale ${money(f.pred_conservative)}` : '')
+      + `</span></div>
+      <div class="flip-sell">
+        <input type="number" inputmode="decimal" class="soldIn" placeholder="sold $">
+        <button class="btn soldBtn">Sold</button>
+      </div></div>`;
+  }
+  html += '</div>';
+  el.innerHTML = html;
+  el.querySelectorAll('.flip').forEach(row=>{
+    row.querySelector('.soldBtn').addEventListener('click', async ()=>{
+      const price = parseFloat(row.querySelector('.soldIn').value);
+      if(!(price >= 0)){ row.querySelector('.soldIn').focus(); return; }
+      await fetch('/api/outcome/sell', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({id: row.dataset.id, sold_price: price})});
+      loadFlips();
+    });
+  });
 }
 
 function note(msg){
@@ -1082,6 +1167,8 @@ fetch('/api/health').then(r=>r.json()).then(d=>{
       + 'still the mock. Swap it in service.py before trusting a number.';
   }
 }).catch(()=>{});
+
+loadFlips();     // show any open flips waiting to be marked sold
 
 if('serviceWorker' in navigator)
   navigator.serviceWorker.register('/sw.js').catch(()=>{});

@@ -38,6 +38,7 @@ _EBAY = None
 _SETTINGS = None
 _OUTBOX = None
 _PRICE_CACHE = None
+_OUTCOMES = None
 _STATIC = Path(__file__).parent / "static"
 
 
@@ -210,6 +211,17 @@ def sync_vault() -> dict:
     except Exception as exc:                            # noqa: BLE001
         out["price_cache_error"] = str(exc)
 
+    # Realized flips — push then pull, merged by id (newest wins), so the log
+    # converges across devices and the desktop backtest can read every sale.
+    try:
+        if _OUTCOMES is not None:
+            _post("/v1/vault/outcomes", {"rows": _OUTCOMES.export_rows()})
+            pulled = _get("/v1/vault/outcomes").get("rows") or []
+            out["outcomes_synced"] = _OUTCOMES.import_rows(pulled)
+            out["outcomes_total"] = _OUTCOMES.stats().get("total", 0)
+    except Exception as exc:                            # noqa: BLE001
+        out["outcome_error"] = str(exc)
+
     return out
 
 
@@ -266,6 +278,20 @@ def _flush_photo_outbox(limit: int = 50) -> dict:
     return {"synced": synced, "dropped": dropped, "pending": _OUTBOX.count()}
 
 
+def _push_outcomes_bg() -> None:
+    """Best-effort background push of the flip log to the vault, so a buy/sale
+    is backed up without blocking the request. Failures ride the next sync."""
+    if _OUTCOMES is None:
+        return
+    def go():
+        try:
+            _vault_call("POST", "/v1/vault/outcomes",
+                        {"rows": _OUTCOMES.export_rows()})
+        except Exception:                              # noqa: BLE001
+            pass
+    threading.Thread(target=go, daemon=True, name="spine-outcomes-push").start()
+
+
 def _startup_sync() -> None:
     """Keys first, then the barcode index — both best-effort, off the hot path."""
     try:
@@ -279,7 +305,7 @@ def configure(source, source_is_real: bool = False, upc_index=None,
               static_dir: Path | None = None, scandex_client=None,
               settings_store=None) -> None:
     global _SOURCE, _SOURCE_IS_REAL, _UPC, _STATIC, _SCANDEX, _SETTINGS
-    global _OUTBOX, _PRICE_CACHE
+    global _OUTBOX, _PRICE_CACHE, _OUTCOMES
     _SOURCE = source
     _SOURCE_IS_REAL = source_is_real
     _UPC = upc_index
@@ -303,6 +329,13 @@ def configure(source, source_is_real: bool = False, upc_index=None,
         _PRICE_CACHE = pricecache.PriceCache(base / "pricecache.db")
     except Exception:                                  # noqa: BLE001
         _PRICE_CACHE = None
+    # The realized-flip log: what you paid and later sold for. Feeds the
+    # eventual quantile recalibration; syncs to the desktop vault.
+    try:
+        import outcomes
+        _OUTCOMES = outcomes.OutcomeLog(base / "outcomes.db")
+    except Exception:                                  # noqa: BLE001
+        _OUTCOMES = None
     if _SETTINGS is not None and scandex_client is None:
         rebuild_clients()
 
@@ -382,6 +415,12 @@ class Handler(BaseHTTPRequestHandler):
                 limit = int((query.get("limit") or ["12"])[0])
                 return self._send(200, core.titles(q, limit))
 
+            if route == "/api/outcomes":
+                if _OUTCOMES is None:
+                    return self._send(200, {"open": [], "stats": {}})
+                return self._send(200, {"open": _OUTCOMES.open_flips(),
+                                        "stats": _OUTCOMES.stats()})
+
             if route.startswith("/api/upc/"):
                 code = urllib.parse.unquote(route[len("/api/upc/"):])
                 if _UPC is None:
@@ -459,6 +498,46 @@ class Handler(BaseHTTPRequestHandler):
 
             if route == "/api/vault/sync":
                 return self._send(200, sync_vault())
+
+            if route == "/api/outcome/buy":
+                if _OUTCOMES is None:
+                    return self._send(503, {"detail": "no outcome log"})
+                if not body.get("title") or body.get("paid") in (None, ""):
+                    raise core.ApiError(400, "title and paid are required")
+                region = body.get("region") or "ntsc_u"
+                variant = body.get("variant") or "unknown"
+                completeness = body.get("completeness") or "loose"
+                sku = (body.get("sku")
+                       or f"{body['title']}|{region}|{variant}|{completeness}")
+                fid = _OUTCOMES.record_buy(
+                    sku=sku, title=body.get("title", ""),
+                    paid=float(body["paid"]), ask=float(body.get("ask") or 0.0),
+                    ship_in=float(body.get("ship_in") or 0.0),
+                    region=region, variant=variant, completeness=completeness,
+                    prediction=body.get("prediction") or {},
+                    note=body.get("note", ""))
+                _push_outcomes_bg()
+                return self._send(200, {"ok": True, "id": fid,
+                                        "stats": _OUTCOMES.stats()})
+
+            if route == "/api/outcome/sell":
+                if _OUTCOMES is None:
+                    return self._send(503, {"detail": "no outcome log"})
+                fid = body.get("id")
+                if not fid or body.get("sold_price") in (None, ""):
+                    raise core.ApiError(400, "id and sold_price are required")
+                ok = _OUTCOMES.record_sale(
+                    fid, sold_price=float(body["sold_price"]),
+                    sold_shipping=float(body.get("sold_shipping") or 0.0),
+                    fees=(float(body["fees"]) if body.get("fees") not in (None, "")
+                          else None),
+                    sold_on=body.get("sold_on") or None,
+                    note=body.get("note"))
+                if not ok:
+                    raise core.ApiError(404, "no such flip")
+                _push_outcomes_bg()
+                return self._send(200, {"ok": True, "flip": _OUTCOMES.get(fid),
+                                        "stats": _OUTCOMES.stats()})
 
             if route == "/api/identify":
                 import identify

@@ -14,7 +14,7 @@ the contamination handling works at all.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import catalog
 import comps
@@ -221,6 +221,72 @@ def _velocity(src):
         if v.est_days_to_sell > whole_title_days * 1.6:
             bad.append(f"{title}: SKU {v.est_days_to_sell:.0f}d vs whole-title "
                        f"{whole_title_days:.0f}d")
+    return bad
+
+
+class _FakeSpread:
+    """A source with a controllable price spread, for the wide-spread guard."""
+    name = "fake-spread"
+
+    def __init__(self, prices, quote_price=None):
+        self._prices = prices
+        self._quote = quote_price
+
+    def sold_records(self, title, region, since):
+        return [comps.SoldRecord(price=float(p), shipping=0.0,
+                                 sold_on=TODAY - timedelta(days=i + 1),
+                                 completeness=C.LOOSE, variant=V.UNKNOWN,
+                                 region=R.NTSC_U)
+                for i, p in enumerate(self._prices)]
+
+    def quote(self, title, region):
+        if self._quote is None:
+            return {}
+        return {C.LOOSE: comps.CompQuote(C.LOOSE, float(self._quote), n=0,
+                                         as_of=TODAY, source=self.name)}
+
+    def active_listing_count(self, title, region):
+        return None
+
+
+@check("spread_guard",
+       "A wide-spread high-value SKU must lower confidence and flag verify; a "
+       "tight or low-value one must not, and the reference-only path is exempt.")
+def _spread_guard(src):
+    bad = []
+
+    def val(prices, quote_price=None):
+        return comps.value_sku(title="X", region=R.NTSC_U, variant=V.UNKNOWN,
+                               completeness=C.LOOSE,
+                               source=_FakeSpread(prices, quote_price),
+                               has_budget_reprint=False, today=TODAY)
+
+    # Wide (700/1400 = 2x) + high value + 16 sales (HIGH base): must flag verify
+    # and drop a tier (HIGH -> MEDIUM), and bid below the median.
+    wide_high = val([700, 1400] * 8)
+    if not wide_high.needs_verify:
+        bad.append("wide+high spread did not set needs_verify")
+    if wide_high.confidence is comps.Confidence.HIGH:
+        bad.append("wide spread left confidence at HIGH (should drop a tier)")
+    if not (wide_high.conservative_resale < wide_high.expected_resale):
+        bad.append("wide+high conservative should sit below the median")
+
+    # Tight + high value: no verify, confidence not dropped by the guard.
+    tight_high = val([900, 950, 1000, 975, 925, 1010, 990, 960,
+                      940, 1005, 995, 970, 930, 985, 1015, 945])
+    if tight_high.needs_verify:
+        bad.append("tight high-value spread wrongly flagged verify")
+
+    # Wide but low value: below the value floor -> no verify.
+    wide_low = val([5, 12] * 8)
+    if wide_low.needs_verify:
+        bad.append("low-value wide spread wrongly flagged verify")
+
+    # Reference-only (no sold data): the synthetic band must not trip the guard.
+    ref_only = val([], quote_price=500.0)
+    if ref_only.needs_verify:
+        bad.append("reference-only price wrongly tripped the spread guard")
+
     return bad
 
 

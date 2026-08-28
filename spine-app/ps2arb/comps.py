@@ -86,6 +86,13 @@ TYPICAL_SHIPPING = 5.50
 # Outlier rejection width, in scaled-MAD units, applied to log prices.
 OUTLIER_K = 3.0
 
+# A p75/p25 above this means the sample is a mixture (variants, completeness,
+# contamination) the filters could not split -- the median is not one market
+# price. Such a SKU is priced a tier more cautiously, and above the value floor
+# is flagged for manual verification rather than quoted like a known price.
+SPREAD_WIDE = 1.8
+VERIFY_VALUE_FLOOR = 60.0      # dollars; below this a wide spread is low-stakes
+
 
 class Confidence(str, Enum):
     NONE = "none"       # do not quote
@@ -101,6 +108,14 @@ CONSERVATIVE_QUANTILE = {
     Confidence.MEDIUM: 0.33,
     Confidence.LOW: 0.25,
     Confidence.NONE: 0.20,
+}
+
+# One-tier confidence drop for a wide-spread SKU. Floored at LOW: still
+# quotable (a human can act on it), just not asserted as a confident price.
+_SPREAD_DOWNGRADE = {
+    Confidence.HIGH: Confidence.MEDIUM,
+    Confidence.MEDIUM: Confidence.LOW,
+    Confidence.LOW: Confidence.LOW,
 }
 
 
@@ -152,6 +167,9 @@ class Valuation:
     est_days_to_sell: float | None
     adjustments: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # A high-value SKU whose price spread is too wide to trust as a single
+    # number: quotable, but a human must confirm the exact copy before paying.
+    needs_verify: bool = False
 
     @property
     def quotable(self) -> bool:
@@ -624,6 +642,27 @@ def value_sku(
     else:
         conf = Confidence.NONE if ref_price is None else Confidence.LOW
 
+    # --- wide-spread guard ------------------------------------------------
+    # A wide p75/p25 means the median is not a real market price. Pull the
+    # pricing confidence down a tier (so `conservative` below bids against a
+    # lower quantile) and, above the value floor, flag for manual verification.
+    # Only for a REAL distribution (>=4 sold): the reference-only fallback uses
+    # a synthetic 0.70-1.35 band that would trip this on every thin title.
+    spread_ratio = (p75 / p25) if p25 > 0 else float("inf")
+    needs_verify = False
+    if len(prices) >= 4 and spread_ratio > SPREAD_WIDE:
+        lowered = _SPREAD_DOWNGRADE.get(conf, conf)
+        note = (f"prices disagree {spread_ratio:.1f}x — mixed variants/conditions, "
+                "not one market price")
+        if lowered is not conf:
+            note += f"; confidence lowered to {lowered.value}"
+            conf = lowered
+        warnings.append(note + ". Verify the exact copy before paying.")
+        if centre >= VERIFY_VALUE_FLOOR:
+            needs_verify = True
+            warnings.append("High value + wide spread — do not bid on this "
+                            "number alone; confirm the variant and completeness.")
+
     # The conservative quantile has to ride the same de-mix scaling as the
     # centre, or it lands on a different variant's price scale entirely and
     # silently understates every black-label SKU.
@@ -659,10 +698,7 @@ def value_sku(
             days_to_sell = 30.0 * (active_sku + 1) / sales_per_month
 
     # --- warnings ---------------------------------------------------------
-    if p25 > 0 and p75 / p25 > 2.0:
-        warnings.append(
-            f"p75/p25 = {p75 / p25:.1f}x — no single market price exists here"
-        )
+    # (Wide-spread is handled above, where it also lowers confidence.)
     if drift is not None and drift < -0.04:
         warnings.append(f"price falling {abs(drift) * 100:.0f}%/month")
     if days_to_sell is not None and days_to_sell > 120:
@@ -686,4 +722,5 @@ def value_sku(
         est_days_to_sell=days_to_sell,
         adjustments=adjustments,
         warnings=warnings,
+        needs_verify=needs_verify,
     )

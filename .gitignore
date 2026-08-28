@@ -13,5 +13,6 @@ __pycache__/
 **/harvest.db
 **/spine_vault.db
 **/pricecache.db
+**/outcomes.db
 **/vault_photos/
 tools/liquidity_counts.json

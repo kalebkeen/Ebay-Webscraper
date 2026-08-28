@@ -136,6 +136,7 @@ class PriceCache:
                 "confidence": val.confidence.value,
                 "n_effective": val.n_effective,
                 "days_to_sell": val.est_days_to_sell,
+                "needs_verify": getattr(val, "needs_verify", False),
                 "adjustments": list(val.adjustments[:4]),
                 "warnings": list(val.warnings[:3]),
             }

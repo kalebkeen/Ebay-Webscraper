@@ -69,6 +69,36 @@ def _all_valuations() -> dict:
             pc.close()
     except Exception as exc:                            # noqa: BLE001
         return {"rows": [], "error": str(exc)}
+
+
+# The realized-flip log the phone pushes up and the desktop backtest reads.
+# Same OutcomeLog store, opened per request. Merged by id (newest wins).
+OUTCOMES_STORE_PATH = Path(os.environ.get("PS2ARB_OUTCOMES", HERE / "outcomes.db"))
+
+
+def _all_outcomes() -> dict:
+    try:
+        import outcomes
+        log = outcomes.OutcomeLog(OUTCOMES_STORE_PATH)
+        try:
+            return {"rows": log.export_rows()}
+        finally:
+            log.close()
+    except Exception as exc:                            # noqa: BLE001
+        return {"rows": [], "error": str(exc)}
+
+
+def _merge_outcomes(rows) -> dict:
+    try:
+        import outcomes
+        log = outcomes.OutcomeLog(OUTCOMES_STORE_PATH)
+        try:
+            n = log.import_rows(rows or [])
+            return {"ok": True, "merged": n, "total": log.stats().get("total", 0)}
+        finally:
+            log.close()
+    except Exception as exc:                            # noqa: BLE001
+        return {"ok": False, "detail": str(exc)}
 VERSION = "1.0"
 
 # Tailscale address ranges. In "open" mode the keystore serves token-free but
@@ -168,6 +198,7 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/vault/scandex": lambda: {"entries": _vault.all_scandex()},
             "/v1/vault/catalog": lambda: {"entries": _vault.all_catalog()},
             "/v1/vault/valuations": _all_valuations,
+            "/v1/vault/outcomes": _all_outcomes,
             "/v1/vault/stats": _vault.stats,
         }
         if self.path in vault_gets:
@@ -192,6 +223,10 @@ class Handler(BaseHTTPRequestHandler):
         }
         if self.path in posters:
             return self._send(200, posters[self.path](body.get("entries") or []))
+
+        # Realized flips push (uses "rows", merged by id).
+        if self.path == "/v1/vault/outcomes":
+            return self._send(200, _merge_outcomes(body.get("rows") or []))
 
         # Photo index: match a query photo, or store a confirmed one.
         if self.path == "/v1/vault/photo/match":

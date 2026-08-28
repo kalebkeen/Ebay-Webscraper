@@ -176,6 +176,7 @@ def value(source, source_is_real: bool, *, title: str,
                 "confidence": val.confidence.value,
                 "n_effective": val.n_effective,
                 "days_to_sell": val.est_days_to_sell,
+                "needs_verify": val.needs_verify,
                 "adjustments": val.adjustments[:4],
                 "warnings": val.warnings[:3],
             }

@@ -37,9 +37,9 @@ anything that doesn't move toward real prices.
   (`C:\Users\kaleb\AppData\Local\Programs\Python\Python312\`), NOT 3.14 — torch
   has no 3.14 wheels. 3.14 still runs the keystore but falls back to dHash.
 - **Tests** are plain scripts: `python test_x.py` (exit code), no pytest.
-  Thirteen suites: corpus, adversarial, comps, economics, backtest, keystore,
-  vault, identify, photo, outbox, sources, pricecache, seed. Run all + the
-  stdlib guard before pushing.
+  Fourteen suites: corpus, adversarial, comps, economics, backtest, keystore,
+  vault, identify, photo, outbox, sources, pricecache, seed, outcomes. Run all
+  + the stdlib guard before pushing.
 - Windows `python3` is a Store stub; use `/c/Python314/python` or the 3.12 path.
 - **Secrets:** Claude never enters API keys. The user sets them on the desktop
   keystore (`python keystore.py set <field> <value>`); the phone syncs them.
@@ -74,7 +74,9 @@ anything that doesn't move toward real prices.
   `pricecharting`, `soldcomps`, `httpjson` (shared stdlib GET), `pricecache`
   (bundled; precomputed estimates the phone reads for instant/offline prices),
   `precompute` (desktop-only harvester CLI that fills the cache), `store`
-  (harvest), `economics`, `decide`, `backtest`, `timeline`, `mock_sources`.
+  (harvest), `economics`, `decide`, `backtest`, `timeline`, `mock_sources`,
+  `outcomes` (bundled realized-flip log — paid vs sold — the ground truth for
+  recalibrating `CONSERVATIVE_QUANTILE`; syncs to the vault).
 - **Serve:** `core`, `service` (FastAPI, desktop), `local_server` (on-device),
   `settings`, `snapshot`, `static/index.html`.
 - **Desktop back-end (NOT bundled):** `keystore`, `vault` (Pillow + CLIP).
