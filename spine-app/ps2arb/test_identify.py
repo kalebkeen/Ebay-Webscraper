@@ -5,7 +5,9 @@ catalog matcher, and degraded to a status (never an exception) on every path.
 """
 from __future__ import annotations
 
+import io
 import json
+import time
 
 import identify
 
@@ -121,10 +123,33 @@ def main() -> int:
     check("503 note is friendly",
           "503" in identify._status_note(503, {})
           and "busy" in identify._status_note(503, {}).lower())
+    # 429 on the free tier is a DAILY cap. Telling the user to "try again in a
+    # moment" would send them retrying something that cannot work until
+    # tomorrow, so it must read differently from a 503.
+    _q = identify._status_note(429, {}).lower()
+    check("429 note explains the daily limit",
+          "reset" in _q and "moment" not in _q)
+    check("429 is not retried (each retry spends scarce daily quota)",
+          429 not in identify._RETRY_STATUS)
+    check("503 is still retried", 503 in identify._RETRY_STATUS)
+
+    calls429 = {"n": 0}
+    def _quota(req, timeout=None):
+        calls429["n"] += 1
+        raise identify.urllib.error.HTTPError(
+            "http://x", 429, "quota", {},
+            io.BytesIO(b'{"error":{"message":"exceeded your current quota"}}'))
+    real0 = identify.urllib.request.urlopen
+    identify.urllib.request.urlopen = _quota
+    try:
+        st, _ = identify._http("POST", "http://x", {}, b"{}",
+                               attempts=3, backoff=0)
+    finally:
+        identify.urllib.request.urlopen = real0
+    check("a 429 gives up immediately, spending one request not three",
+          st == 429 and calls429["n"] == 1)
     check("401 note keeps status",
           "401" in identify._status_note(401, {"error": {"message": "nope"}}))
-
-    import io
 
     class _Resp:
         status = 200
@@ -165,6 +190,65 @@ def main() -> int:
         identify.urllib.request.urlopen = real
     check("gives up after N tries on persistent 503",
           status == 503 and calls2["n"] == 3)
+
+    # 11. A stalled service (no reply at all) is the SAME transient condition as
+    # a 503 -- under load the free tier grinds instead of refusing. It must be
+    # retried and reported plainly, not surfaced as a raw socket error.
+    check("timeout note is friendly",
+          "slow" in identify._status_note(identify._TIMED_OUT, {}).lower())
+    check("timeout is recognised as a timeout",
+          identify._is_timeout(TimeoutError("timed out")))
+    check("a refused connection is NOT a timeout",
+          not identify._is_timeout(OSError("connection refused")))
+    check("URLError wrapping a timeout counts",
+          identify._is_timeout(
+              identify.urllib.error.URLError(TimeoutError("timed out"))))
+
+    calls3 = {"n": 0}
+    def _stall(req, timeout=None):
+        calls3["n"] += 1
+        raise TimeoutError("The read operation timed out")
+    identify.urllib.request.urlopen = _stall
+    try:
+        status, payload = identify._http("POST", "http://x", {}, b"{}",
+                                         attempts=3, backoff=0)
+    finally:
+        identify.urllib.request.urlopen = real
+    check("a stalled service retries and reports as transient",
+          status == identify._TIMED_OUT and calls3["n"] == 3)
+    check("stall does not escape as an exception",
+          "slow" in identify._status_note(status, payload).lower())
+
+    # A genuinely dead network must still say so -- "busy" would send the user
+    # looking for the wrong problem.
+    calls4 = {"n": 0}
+    def _dead(req, timeout=None):
+        calls4["n"] += 1
+        raise identify.urllib.error.URLError("no route to host")
+    identify.urllib.request.urlopen = _dead
+    raised = False
+    try:
+        identify._http("POST", "http://x", {}, b"{}", attempts=2, backoff=0)
+    except OSError:
+        raised = True
+    finally:
+        identify.urllib.request.urlopen = real
+    check("no network still raises rather than reporting 'busy'", raised)
+
+    # The wall-clock budget must stop the loop even with attempts left.
+    calls5 = {"n": 0}
+    def _slow503(req, timeout=None):
+        calls5["n"] += 1
+        time.sleep(0.05)
+        raise _err503()
+    identify.urllib.request.urlopen = _slow503
+    try:
+        identify._http("POST", "http://x", {}, b"{}",
+                       attempts=50, backoff=0, deadline=0.12)
+    finally:
+        identify.urllib.request.urlopen = real
+    check("the time budget stops retrying before the attempt cap",
+          0 < calls5["n"] < 50)
 
     failures = [n for n, ok in CHECKS if not ok]
     print("-" * 72)

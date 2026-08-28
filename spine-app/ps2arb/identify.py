@@ -80,24 +80,60 @@ class IdentifyResult:
         return self.status == "matched" and self.title is not None
 
 
-# Statuses worth another try: rate limits and the free tier's transient
-# "overloaded" errors (429 + 5xx). Gemini's free tier 503s under load fairly
-# often, and a single scan shouldn't fail because of a momentary blip.
-_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+# Statuses worth another try: the free tier's transient "overloaded" errors.
+# A single scan shouldn't fail because of a momentary blip.
+#
+# 429 is deliberately NOT here. On Gemini's free tier it means the DAILY quota
+# is gone (measured 2026-08-28: GenerateRequestsPerDayPerProjectPerModel-
+# FreeTier, limit 20 per day PER MODEL), not "slow down for a second". Retrying
+# cannot succeed, and with only twenty requests a day to spend, burning three
+# of them on a refusal that was never going to change is the expensive mistake.
+_RETRY_STATUS = frozenset({500, 502, 503, 504})
 
 
-# 15s, not 40s. When the free tier is overloaded it does not refuse quickly —
-# it HOLDS the request for most of the timeout and then 503s, so the timeout is
-# effectively the per-attempt cost of a bad minute. At 40s x 3 attempts plus
-# backoff that was a 123-second wait to be told it failed, which is worse than
-# failing fast: you would have moved on to the next disc a minute earlier. 15s
-# is still well clear of a healthy response (2-5s) and caps the worst case near
-# 48s. Measured live 2026-08-28: a real overload burned the full 40s per try.
-_TIMEOUT = 15.0
+# Timing, measured against the live free tier 2026-08-28 while it was
+# congested. Latency is strongly BIMODAL: a call either comes back in 1-4s or
+# it grinds for 30-50s, and the slow ones are as likely to end in 503 as in an
+# answer. Seven models sampled, every one showing the same shape.
+#
+# That shape decides the strategy. A long per-attempt timeout mostly buys
+# waiting: it turns a fast retry into a slow one without improving the odds,
+# and 40s x 3 was a 123-second wait to be told it failed. A SHORT timeout with
+# MORE attempts plays the fast path repeatedly, which is where the answers are.
+#
+# So: cut each attempt off at 12s (fast successes land well inside it), and
+# govern the whole thing with a wall-clock budget instead of a fixed count, so
+# quick 503s buy extra tries while slow ones do not blow the budget.
+#
+# Attempts stay at THREE despite the bimodal odds arguing for more. The free
+# tier allows only twenty requests per day per model, so every retry is a
+# meaningful fraction of a day's scanning: six attempts would let three failed
+# scans consume the entire daily allowance. Quota, not latency, is the binding
+# constraint here.
+_TIMEOUT = 12.0
+_DEADLINE = 45.0
+_ATTEMPTS = 3
+
+# Our own synthetic status for "the server never answered in time". Not a real
+# HTTP code from the service -- it exists so a timeout reports as the transient
+# it almost always is, instead of surfacing a raw socket error.
+_TIMED_OUT = 408
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """A read/connect timeout, as opposed to a genuinely dead network.
+
+    Worth separating: a timeout means the service is slow (retry, and tell the
+    user it is busy), while a refused or unroutable connection means there is
+    no network at all (say so -- that is actionable, "busy" is not)."""
+    return isinstance(exc, TimeoutError) or isinstance(
+        getattr(exc, "reason", None), TimeoutError)
 
 
 def _http(method: str, url: str, headers: dict, body: bytes,
-          timeout: float = _TIMEOUT, *, attempts: int = 3, backoff: float = 1.0):
+          timeout: float = _TIMEOUT, *, attempts: int = _ATTEMPTS,
+          backoff: float = 0.5, deadline: float = _DEADLINE):
+    started = time.monotonic()
     last = (0, {})
     for i in range(attempts):
         try:
@@ -114,12 +150,19 @@ def _http(method: str, url: str, headers: dict, body: bytes,
             except json.JSONDecodeError:
                 payload = {"raw": raw[:300]}
             last = (exc.code, payload)
-            if exc.code not in _RETRY_STATUS or i == attempts - 1:
+            if exc.code not in _RETRY_STATUS:
                 return exc.code, payload
-        except OSError:                       # connection error / timeout
-            if i == attempts - 1:
-                raise
-        time.sleep(backoff * (2 ** i))        # 1s, 2s between tries
+        except OSError as exc:
+            if not _is_timeout(exc):          # no network — do not dress it up
+                if i == attempts - 1:
+                    raise
+            else:
+                last = (_TIMED_OUT, {"error": {"message": (
+                    f"no response within {timeout:.0f}s")}})
+        # Stop on the attempt cap or the time budget, whichever comes first.
+        if i == attempts - 1 or (time.monotonic() - started) >= deadline:
+            break
+        time.sleep(min(backoff * (2 ** i), 2.0))
     return last
 
 
@@ -155,8 +198,20 @@ def _err_detail(payload) -> str:
 def _status_note(status: int, payload) -> str:
     """A human-readable note for a non-200 vision response. Keeps the numeric
     status (useful for debugging) but explains the transient ones plainly."""
-    if status in (429, 503):
-        return (f"the photo service is busy right now ({status}) — "
+    if status == _TIMED_OUT:
+        # We gave up waiting rather than being refused. Under load the service
+        # stalls instead of saying no, so this is the same condition as a 503
+        # and deserves the same plain explanation, not a socket error.
+        return ("the photo service is slow right now — it didn't answer in "
+                "time; try again in a moment")
+    if status == 429:
+        # A daily cap, not a momentary one — "try again in a moment" would be
+        # actively misleading. Say what ran out and what to do about it.
+        return ("today's free photo scans for this model are used up (429) — "
+                "they reset tomorrow, or pick another model on the keystore "
+                "(each model has its own daily allowance)")
+    if status == 503:
+        return ("the photo service is busy right now (503) — "
                 "try again in a moment")
     if status in (500, 502, 504):
         return f"the photo service had a temporary error ({status}) — try again"
