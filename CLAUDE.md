@@ -37,9 +37,9 @@ anything that doesn't move toward real prices.
   (`C:\Users\kaleb\AppData\Local\Programs\Python\Python312\`), NOT 3.14 — torch
   has no 3.14 wheels. 3.14 still runs the keystore but falls back to dHash.
 - **Tests** are plain scripts: `python test_x.py` (exit code), no pytest.
-  Fourteen suites: corpus, adversarial, comps, economics, backtest, keystore,
-  vault, identify, photo, outbox, sources, pricecache, seed, outcomes. Run all
-  + the stdlib guard before pushing.
+  Fifteen suites: corpus, adversarial, comps, economics, backtest, keystore,
+  vault, identify, photo, outbox, phash, sources, pricecache, seed, outcomes.
+  Run all + the stdlib guard before pushing.
 - Windows `python3` is a Store stub; use `/c/Python314/python` or the 3.12 path.
 - **Secrets:** Claude never enters API keys. The user sets them on the desktop
   keystore (`python keystore.py set <field> <value>`); the phone syncs them.
@@ -55,6 +55,14 @@ anything that doesn't move toward real prices.
   valuation path.
 - Photo identify keeps the vision model internal (product choice) but keeps
   confidence/confirm visible.
+- **The offline cover matcher abstains rather than guesses.** It runs when
+  nothing else can, so nothing is left to catch it being wrong. `phash_index`
+  refuses on distance (cutoff) and on ambiguity (a different title within
+  `margin` bits — sequels share box art). Falling through to the normal path is
+  nearly free; a confident wrong title is not. Measured: 0% wrong answers.
+- **`vault._boxhash_rgba` and `coverHash()` in `static/index.html` are one
+  algorithm in two languages.** A change to either without the other silently
+  disables offline matching. `test_phash.py` pins the bit layout.
 
 ## Workflow
 - After changes: run all suites + the stdlib guard; commit + push to `main`

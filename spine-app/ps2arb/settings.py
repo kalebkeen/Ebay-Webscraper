@@ -45,6 +45,13 @@ FIELDS = {
     "vision_model":       "VISION_MODEL",
     "vision_base_url":    "VISION_BASE_URL",
     "anthropic_api_key":  "ANTHROPIC_API_KEY",
+    # Offline cover matching (phash_index.py). Tuning knobs rather than
+    # credentials, but keystore-served for the same reason vision_model is:
+    # if the thresholds turn out wrong in the field they can be corrected from
+    # the desktop instead of waiting on an APK rebuild. Raising the cutoff
+    # finds more covers; raising the margin makes it abstain more readily.
+    "phash_cutoff":       "PS2ARB_PHASH_CUTOFF",
+    "phash_margin":       "PS2ARB_PHASH_MARGIN",
     # How the phone reaches the desktop keystore. These are LOCAL config, not
     # service credentials: the keystore never stores or serves them — they are
     # how you get to it. keystore_url is e.g. http://desk.tailXXXX.ts.net:8787
@@ -64,7 +71,7 @@ KEYSTORE_SERVED_FIELDS = {
     "scandex_token", "ebay_client_id", "ebay_client_secret",
     "pricecharting_token", "soldcomps_token", "thegamesdb_token",
     "vision_provider", "vision_api_key", "vision_model", "vision_base_url",
-    "anthropic_api_key",
+    "anthropic_api_key", "phash_cutoff", "phash_margin",
 }
 
 # The desktop keystore writes its OWN store (keystore.json); the desktop's

@@ -18,7 +18,8 @@ DEST="android/app/src/main/python"
 # like everything else rather than trusted to stay aligned by hand.
 MODULES=(catalog.py catalog_data.py comps.py core.py decide.py ebay.py
          economics.py fuzzy.py httpjson.py identify.py listing_parser.py
-         local_server.py mock_sources.py outcomes.py photo_outbox.py
+         local_server.py mock_sources.py outcomes.py phash_index.py
+         photo_outbox.py
          pipeline.py pricecache.py pricecharting.py scandex.py sequel.py
          settings.py soldcomps.py sources.py store.py upc.py)
 

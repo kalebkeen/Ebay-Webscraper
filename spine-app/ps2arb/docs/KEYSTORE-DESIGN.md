@@ -258,6 +258,44 @@ neither ever enters the APK). `stats.photo_match` reports which is live.
 Python 3.12** (installed side-by-side) so CLIP is available; the phone/APK is
 unaffected either way.
 
+**Offline cover matching added 2026-08-28** — the third tier, for when the
+desktop cannot be reached at all.
+
+Both backends above are desktop-side: the phone sends the photo over Tailscale
+and the desktop does the matching, because CLIP needs torch and the phone
+bundle is stdlib-only. So an asleep desktop or a dead signal fell all the way
+through to the vision model, and with no signal there was nothing left.
+
+The fix is a hash small enough to travel and simple enough to compute in
+JavaScript:
+
+- **`vault._boxhash`** — a 64-bit box-average hash (9x8 cells, ITU-R 601-2
+  luma, integer cell means, horizontal comparisons), stored in the `bhash`
+  column and backfilled on keystore start. Deliberately filter-independent:
+  measured divergence between resampling filters is 0-2 bits (6 worst case),
+  well inside the match threshold.
+- **`GET /v1/vault/phashes`** — exports `{h, t, v}` rows. 340 covers is 25 KB;
+  ~4,000 would be around 300 KB. Pull-only, synced like the price cache.
+- **`phash_index.py`** (bundled, stdlib) — integer-only nearest-neighbour over
+  the pulled table. No pixels ever reach it.
+- **`coverHash()` in `static/index.html`** — the same algorithm in JS, run on
+  the captured canvas. **These two implementations must stay identical**; a
+  divergence raises nothing and silently disables offline matching.
+  `test_phash.py` pins the bit layout.
+
+`/api/identify` order is now: desktop CLIP (3.5s timeout, down from an
+inherited 12s that stalled every offline identify) → offline hash → vision
+model. Shelf photos skip the hash: a whole-image hash describes none of the
+several covers in the frame.
+
+**It abstains rather than guesses**, on distance (`phash_cutoff`, default 16)
+and on ambiguity (`phash_margin`, default 3 — a *different* title that close is
+unresolvable; sequels routinely share box art, e.g. Air Ranger 1/2 hash
+identically). Both are keystore-served, retunable without an APK rebuild.
+Measured against the 340-cover index with simulated handheld capture: careful
+98% correct, typical 81%, sloppy 11%, **0% wrong in all three** — abstaining
+costs only a fallthrough, a wrong title costs a bad buy.
+
 Not yet done in Phase 2: the store.py **sold-price harvest** (needs eBay keys —
 the real payoff, deferred with the eBay work).
 

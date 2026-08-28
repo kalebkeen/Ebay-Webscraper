@@ -199,6 +199,7 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/vault/catalog": lambda: {"entries": _vault.all_catalog()},
             "/v1/vault/valuations": _all_valuations,
             "/v1/vault/outcomes": _all_outcomes,
+            "/v1/vault/phashes": lambda: {"rows": _vault.all_phashes()},
             "/v1/vault/stats": _vault.stats,
         }
         if self.path in vault_gets:
@@ -277,6 +278,17 @@ def serve(host: str | None = None, port: int | None = None) -> None:
         print(f"  catalog snapshot -> vault: {res.get('stored', 0)} titles")
     except Exception as exc:                            # noqa: BLE001
         print(f"  (catalog snapshot skipped: {exc})")
+
+    # Fill in box hashes for any covers stored before that column existed, so
+    # the phone's offline table is complete. Idempotent and a no-op once caught
+    # up, so it is safe on every start.
+    try:
+        bf = _vault.backfill_bhash()
+        if bf.get("filled"):
+            print(f"  offline cover hashes: +{bf['filled']} "
+                  f"({bf.get('remaining', 0)} still missing)")
+    except Exception as exc:                            # noqa: BLE001
+        print(f"  (cover hash backfill skipped: {exc})")
 
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.token = token                               # type: ignore[attr-defined]

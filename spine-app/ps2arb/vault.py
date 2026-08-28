@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS photo_index (
     barcode    TEXT,              -- linked barcode if known, else ''
     file       TEXT,              -- relative filename under PHOTO_DIR
     embedding  TEXT,              -- CLIP embedding as JSON floats, if available
+    bhash      TEXT,              -- box-average hash, the one the PHONE matches on
     created_at TEXT DEFAULT (datetime('now'))
 );
 """
@@ -98,10 +99,14 @@ def _conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
-    # Migrate a pre-embedding photo_index (added 2026-08-26).
+    # Migrate a pre-embedding photo_index (added 2026-08-26) and a pre-bhash
+    # one (added 2026-08-28 for the phone's offline matcher).
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(photo_index)")}
     if "embedding" not in cols:
         conn.execute("ALTER TABLE photo_index ADD COLUMN embedding TEXT")
+        conn.commit()
+    if "bhash" not in cols:
+        conn.execute("ALTER TABLE photo_index ADD COLUMN bhash TEXT")
         conn.commit()
     return conn
 
@@ -301,6 +306,54 @@ def _embed(image_bytes: bytes) -> list[float]:
     return [float(x) for x in vec]
 
 
+# --------------------------------------------------------------------------
+# The canonical box-average hash — shared, byte for byte, with the browser.
+#
+# The phone bundle is stdlib-only and so has no image decoder, which is why the
+# offline cover match has to be computed in JavaScript on a <canvas>. That only
+# works if both sides produce the SAME 64 bits, so this is written to be
+# trivially portable: scale to a fixed grid-aligned buffer, take ITU-R 601-2
+# luma, average each cell with integer division, compare horizontally adjacent
+# cells. No filter-dependent tricks, no floats in the comparison.
+#
+# ANY CHANGE HERE MUST BE MIRRORED IN static/index.html's coverHash(), or the
+# phone will silently stop matching. test_phash.py pins the algorithm.
+# --------------------------------------------------------------------------
+
+_BOX_W, _BOX_H = 9, 8          # 9x8 cells -> 8 rows * 8 comparisons = 64 bits
+_BOX_CELL = 16                 # each cell averages a 16x16 block
+
+
+def _boxhash_rgba(px, w: int, h: int) -> str:
+    """The portable core: flat RGBA bytes -> 16 hex chars. Mirrored in JS."""
+    n = _BOX_W * _BOX_H
+    total = [0] * n
+    count = [0] * n
+    for y in range(h):
+        gy = (y * _BOX_H) // h
+        row = y * w * 4
+        for x in range(w):
+            i = row + x * 4
+            k = gy * _BOX_W + ((x * _BOX_W) // w)
+            total[k] += px[i] * 299 + px[i + 1] * 587 + px[i + 2] * 114
+            count[k] += 1
+    cell = [(total[k] // count[k] if count[k] else 0) for k in range(n)]
+    bits = 0
+    for r in range(_BOX_H):
+        for c in range(_BOX_W - 1):
+            k = r * _BOX_W + c
+            bits = (bits << 1) | (1 if cell[k] > cell[k + 1] else 0)
+    return f"{bits:016x}"
+
+
+def _boxhash(image_bytes: bytes) -> str:
+    """Box-average hash of an encoded image. Resizes to a fixed grid-aligned
+    buffer first so the cell mapping is identical to the browser's."""
+    w, h = _BOX_W * _BOX_CELL, _BOX_H * _BOX_CELL
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA").resize((w, h))
+    return _boxhash_rgba(img.tobytes(), w, h)
+
+
 def _dhash(image_bytes: bytes) -> str:
     """64-bit difference hash as 16 hex chars."""
     img = Image.open(io.BytesIO(image_bytes)).convert("L").resize(
@@ -332,6 +385,7 @@ def add_photo(image_b64: str, title: str, variant: str = "unknown",
     try:
         raw = base64.b64decode(image_b64)
         phash = _dhash(raw)
+        bhash = _boxhash(raw)                           # what the phone matches on
     except Exception as exc:                            # noqa: BLE001
         return {"ok": False, "detail": f"bad image: {exc}"}
     emb = None
@@ -352,8 +406,10 @@ def add_photo(image_b64: str, title: str, variant: str = "unknown",
                         "total": total}
         PHOTO_DIR.mkdir(parents=True, exist_ok=True)
         cur = conn.execute(
-            "INSERT INTO photo_index (phash,title,variant,barcode,file,embedding) "
-            "VALUES (?,?,?,?,?,?)", (phash, title, variant, barcode, "", emb))
+            "INSERT INTO photo_index "
+            "(phash,title,variant,barcode,file,embedding,bhash) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (phash, title, variant, barcode, "", emb, bhash))
         rid = cur.lastrowid
         fname = f"{rid:06d}_{phash[:8]}.jpg"
         (PHOTO_DIR / fname).write_bytes(raw)
@@ -441,6 +497,58 @@ def stats() -> dict:
             "photos": photos, "photo_index": _HAVE_PIL,
             "photo_match": "clip" if _HAVE_CLIP else "dhash",
             "db": str(DB_PATH)}
+
+
+def all_phashes() -> list[dict]:
+    """The offline cover table the phone pulls: one compact row per stored
+    photo. Keys are short because this ships over the wire and sits in the
+    app's private dir — at ~4,000 covers it is still well under a megabyte.
+
+    Rows without a bhash are skipped rather than guessed at; backfill_bhash()
+    fills them in on the desktop, where Pillow exists."""
+    conn = _conn()
+    try:
+        rows = conn.execute(
+            "SELECT bhash, title, variant FROM photo_index "
+            "WHERE bhash IS NOT NULL AND bhash <> ''").fetchall()
+    finally:
+        conn.close()
+    return [{"h": r["bhash"], "t": r["title"], "v": r["variant"] or "unknown"}
+            for r in rows]
+
+
+def backfill_bhash(limit: int = 0) -> dict:
+    """Compute the box hash for photos stored before the column existed.
+
+    Reads each image back off disk, so it needs Pillow and is desktop-only.
+    Idempotent and resumable — it only touches rows with no bhash, so it can
+    be called on every keystore start without cost once it has caught up."""
+    if not _HAVE_PIL:
+        return {"ok": False, "detail": "no Pillow", "filled": 0}
+    conn = _conn()
+    filled = missing = 0
+    try:
+        rows = conn.execute(
+            "SELECT id, file FROM photo_index "
+            "WHERE (bhash IS NULL OR bhash = '') AND file <> ''").fetchall()
+        if limit:
+            rows = rows[:limit]
+        for r in rows:
+            path = PHOTO_DIR / r["file"]
+            try:
+                conn.execute("UPDATE photo_index SET bhash=? WHERE id=?",
+                             (_boxhash(path.read_bytes()), r["id"]))
+                filled += 1
+            except Exception:                           # noqa: BLE001
+                missing += 1                            # file gone or unreadable
+        conn.commit()
+        remaining = conn.execute(
+            "SELECT COUNT(*) FROM photo_index "
+            "WHERE bhash IS NULL OR bhash = ''").fetchone()[0]
+    finally:
+        conn.close()
+    return {"ok": True, "filled": filled, "unreadable": missing,
+            "remaining": remaining}
 
 
 def photo_titles() -> set:

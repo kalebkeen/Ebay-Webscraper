@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -39,7 +40,33 @@ _SETTINGS = None
 _OUTBOX = None
 _PRICE_CACHE = None
 _OUTCOMES = None
+_PHASH = None
 _STATIC = Path(__file__).parent / "static"
+
+# How long to wait on the desktop's CLIP match before giving up and trying the
+# next thing. Deliberately short: the desktop is either on the tailnet and
+# answers in well under a second, or it is asleep and every extra second is
+# dead time in front of the shelf. This used to inherit _vault_call's 12s
+# default, which made an unreachable desktop stall the whole identify.
+_PHOTO_MATCH_TIMEOUT = 3.5
+
+# Once the desktop has failed to answer, stop asking for a while. Without this
+# every scan pays the timeout again, which is worst exactly when it hurts most:
+# working down a shelf with no signal, where the desktop is not coming back
+# this minute and the offline table could have answered instantly. Any
+# successful sync clears it, so a desktop that wakes up is used again at once.
+_VAULT_DOWN_BACKOFF = 60.0
+_vault_down_until = 0.0
+
+
+def _vault_probably_down() -> bool:
+    return time.monotonic() < _vault_down_until
+
+
+def _note_vault_result(reachable: bool) -> None:
+    global _vault_down_until
+    _vault_down_until = 0.0 if reachable else (time.monotonic()
+                                               + _VAULT_DOWN_BACKOFF)
 
 
 def rebuild_clients() -> None:
@@ -162,6 +189,8 @@ def sync_vault() -> dict:
             out["vault_total"] = pushed.get("total", 0)
         else:
             _get("/v1/vault/stats")   # still prove reachability if no index yet
+        # Reachable: let identify try the desktop again immediately.
+        _note_vault_result(True)
     except urllib.error.HTTPError as exc:
         return {"ok": False, "detail": f"vault returned {exc.code}"}
     except Exception as exc:                            # noqa: BLE001
@@ -211,6 +240,17 @@ def sync_vault() -> dict:
     except Exception as exc:                            # noqa: BLE001
         out["price_cache_error"] = str(exc)
 
+    # Offline cover hashes — PULL ONLY, same shape as the price cache. This is
+    # what lets a cover resolve with no network; keeping it fresh matters most
+    # right after a seeding run added a few hundred covers.
+    try:
+        if _PHASH is not None:
+            rows = _get("/v1/vault/phashes").get("rows") or []
+            out["covers_synced"] = _PHASH.replace(rows)
+            out["covers_total"] = _PHASH.count()
+    except Exception as exc:                            # noqa: BLE001
+        out["phash_error"] = str(exc)
+
     # Realized flips — push then pull, merged by id (newest wins), so the log
     # converges across devices and the desktop backtest can read every sale.
     try:
@@ -249,6 +289,29 @@ def _vault_call(method: str, path: str, payload=None, timeout: float = 12.0):
             return _json.loads(resp.read().decode())
     except Exception:                                  # noqa: BLE001
         return None
+
+
+def _phash_match(hex_hash: str) -> dict | None:
+    """Offline cover lookup against the synced hash table.
+
+    Thresholds come from settings so they are retunable from the desktop
+    keystore without an APK rebuild; a bad or missing value falls back to the
+    measured defaults rather than disabling matching."""
+    if _PHASH is None or not hex_hash:
+        return None
+    import phash_index
+
+    def _num(field, default):
+        raw = (_SETTINGS.get(field) if _SETTINGS else "") or ""
+        try:
+            return int(str(raw).strip())
+        except (TypeError, ValueError):
+            return default
+
+    res = _PHASH.match(hex_hash,
+                       cutoff=_num("phash_cutoff", phash_index.CUTOFF),
+                       margin=_num("phash_margin", phash_index.MARGIN))
+    return res if res.get("matched") else None
 
 
 def _flush_photo_outbox(limit: int = 50) -> dict:
@@ -305,7 +368,7 @@ def configure(source, source_is_real: bool = False, upc_index=None,
               static_dir: Path | None = None, scandex_client=None,
               settings_store=None) -> None:
     global _SOURCE, _SOURCE_IS_REAL, _UPC, _STATIC, _SCANDEX, _SETTINGS
-    global _OUTBOX, _PRICE_CACHE, _OUTCOMES
+    global _OUTBOX, _PRICE_CACHE, _OUTCOMES, _PHASH
     _SOURCE = source
     _SOURCE_IS_REAL = source_is_real
     _UPC = upc_index
@@ -336,6 +399,13 @@ def configure(source, source_is_real: bool = False, upc_index=None,
         _OUTCOMES = outcomes.OutcomeLog(base / "outcomes.db")
     except Exception:                                  # noqa: BLE001
         _OUTCOMES = None
+    # Cover hashes pulled from the desktop, for identifying a cover with no
+    # network at all. An empty table just means offline identify abstains.
+    try:
+        import phash_index
+        _PHASH = phash_index.PhashIndex(base / "phash_index.json")
+    except Exception:                                  # noqa: BLE001
+        _PHASH = None
     if _SETTINGS is not None and scandex_client is None:
         rebuild_clients()
 
@@ -556,8 +626,15 @@ class Handler(BaseHTTPRequestHandler):
                     return out
 
                 # 1. Your own photo library first — free and instant on a
-                # repeat cover, no vision-API call at all.
-                vm = _vault_call("POST", "/v1/vault/photo/match", {"image": img})
+                # repeat cover, no vision-API call at all. Short timeout: an
+                # asleep desktop must not stall the paths below it, and after
+                # one failure we stop asking for a minute (see the backoff).
+                vm = None
+                if not _vault_probably_down():
+                    vm = _vault_call("POST", "/v1/vault/photo/match",
+                                     {"image": img},
+                                     timeout=_PHOTO_MATCH_TIMEOUT)
+                    _note_vault_result(vm is not None)
                 if vm and vm.get("matched"):
                     hit = vm["matched"]
                     title = hit.get("title")
@@ -568,7 +645,23 @@ class Handler(BaseHTTPRequestHandler):
                         "note": "recognized from your photo library"},
                         title, hit.get("variant") or "unknown"))
 
-                # 2. Fall back to the vision model.
+                # 2. The desktop did not answer (asleep, or no signal). Try the
+                # offline table using the hash the browser computed on-device.
+                # Less accurate than CLIP, so it abstains rather than guesses —
+                # but it is the ONLY thing that works with no network at all.
+                pm = _phash_match(body.get("phash") or "")
+                if pm:
+                    hit = pm["matched"]
+                    title = hit.get("title")
+                    return self._send(200, _priced({
+                        "status": "matched", "title": title, "raw_title": title,
+                        "variant": hit.get("variant") or "unknown",
+                        "confidence": "medium", "source": "offline-covers",
+                        "note": "matched offline against your cover library — "
+                                "check the spine before you pay"},
+                        title, hit.get("variant") or "unknown"))
+
+                # 3. Fall back to the vision model.
                 s = _SETTINGS
                 provider = (s.get("vision_provider") if s else "") or None
                 key = (s.get("vision_api_key") if s else "") \
@@ -585,6 +678,21 @@ class Handler(BaseHTTPRequestHandler):
                        "source": "vision"}
                 if res.usable:
                     _priced(out, res.title, res.variant)
+                elif res.status == "error" and _PHASH is not None:
+                    # Everything failed, which usually means no network at all.
+                    # Say why the offline table did not save it, so the miss is
+                    # actionable ("get closer / hold it square") rather than a
+                    # blank wall.
+                    off = _PHASH.match(body.get("phash") or "")
+                    why = {"empty": "no covers synced yet — sync while you have "
+                                    "signal to enable offline matching",
+                           "no_hash": "this build could not hash the photo",
+                           "far": "no close enough cover offline — try filling "
+                                  "the frame with the front cover, square on",
+                           "ambiguous": "offline match was too close to call "
+                                        "between similar covers"}
+                    out["offline_note"] = why.get(off.get("reason"), "")
+                    out["offline_covers"] = _PHASH.count()
                 return self._send(200, out)
 
             if route == "/api/identify/remember":
