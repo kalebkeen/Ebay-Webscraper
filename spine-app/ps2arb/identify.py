@@ -86,8 +86,18 @@ class IdentifyResult:
 _RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
+# 15s, not 40s. When the free tier is overloaded it does not refuse quickly —
+# it HOLDS the request for most of the timeout and then 503s, so the timeout is
+# effectively the per-attempt cost of a bad minute. At 40s x 3 attempts plus
+# backoff that was a 123-second wait to be told it failed, which is worse than
+# failing fast: you would have moved on to the next disc a minute earlier. 15s
+# is still well clear of a healthy response (2-5s) and caps the worst case near
+# 48s. Measured live 2026-08-28: a real overload burned the full 40s per try.
+_TIMEOUT = 15.0
+
+
 def _http(method: str, url: str, headers: dict, body: bytes,
-          timeout: float = 40.0, *, attempts: int = 3, backoff: float = 1.0):
+          timeout: float = _TIMEOUT, *, attempts: int = 3, backoff: float = 1.0):
     last = (0, {})
     for i in range(attempts):
         try:
