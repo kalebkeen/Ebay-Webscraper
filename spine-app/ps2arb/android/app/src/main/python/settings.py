@@ -45,6 +45,14 @@ FIELDS = {
     "vision_model":       "VISION_MODEL",
     "vision_base_url":    "VISION_BASE_URL",
     "anthropic_api_key":  "ANTHROPIC_API_KEY",
+    # A vision model running on the DESKTOP (Ollama). Desktop-only config: the
+    # phone never calls it directly -- the keystore does, on loopback -- so
+    # these are deliberately not in KEYSTORE_SERVED_FIELDS. Keeping Ollama on
+    # 127.0.0.1 matters: it has no authentication of its own, so binding it to
+    # the tailnet would put an open model server on the network. The keystore
+    # already gates access by source IP, so it is the right front door.
+    "local_vision_url":   "PS2ARB_LOCAL_VISION_URL",
+    "local_vision_model": "PS2ARB_LOCAL_VISION_MODEL",
     # Offline cover matching (phash_index.py). Tuning knobs rather than
     # credentials, but keystore-served for the same reason vision_model is:
     # if the thresholds turn out wrong in the field they can be corrected from
@@ -73,6 +81,12 @@ KEYSTORE_SERVED_FIELDS = {
     "vision_provider", "vision_api_key", "vision_model", "vision_base_url",
     "anthropic_api_key", "phash_cutoff", "phash_margin",
 }
+
+# Config the DESKTOP keystore stores for itself and never serves to a phone.
+# `keystore.py set` accepts these too, so they are configurable the same way as
+# everything else, but /v1/keys will not hand them out -- a loopback URL is
+# useless to the phone and publishing it only invites confusion.
+KEYSTORE_LOCAL_FIELDS = {"local_vision_url", "local_vision_model"}
 
 # The desktop keystore writes its OWN store (keystore.json); the desktop's
 # other tools -- precompute, seed_covers, service (via sources.build_source) --

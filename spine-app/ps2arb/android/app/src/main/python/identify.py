@@ -54,6 +54,29 @@ _PROMPT_SINGLE = (
     'game title), "variant", "confidence". ' + _VARIANT_NOTE +
     " If the image is not a PS2 game, set title to null."
 )
+# The shortlist prompt. Used when the CLIP index can offer visually similar
+# covers but was not confident enough to answer alone.
+#
+# Why this exists: a model reading a cover cold has to invent the exact
+# canonical string, and that is where a small local model actually fails --
+# measured errors were "Aqua Aqua: The Addictive, Fast-Action 3D Puzzler!" for
+# "Aqua Aqua", "BLACK: PS2 Game" for "Black", the Japanese title instead of the
+# romanised one. It saw the right cover every time. Given the canonical strings
+# to choose from, a local 4B went from 50% to 89% correct on the same images.
+#
+# It must stay possible to answer "none of these", or the shortlist would turn
+# an unknown cover into a confident wrong pick -- which is the one outcome this
+# pipeline must never produce.
+_PROMPT_SHORTLIST = (
+    "You are identifying a PlayStation 2 (PS2) game from a photo of its cover "
+    "or spine. These titles from the reference library look visually similar, "
+    "most similar first:\n{candidates}\n"
+    "If the photo shows one of them, reply with that title copied EXACTLY as "
+    "written above. If it is clearly none of them, reply with the title as "
+    "printed on the cover instead. Do not guess a listed title merely because "
+    "it is similar. Respond with ONLY a JSON object and no other text with "
+    'keys "title", "variant", "confidence". ' + _VARIANT_NOTE
+)
 _PROMPT_MULTI = (
     "You are identifying PlayStation 2 (PS2) games from a photo that shows one "
     "or more game spines or covers (e.g. a shelf or a stack). Respond with "
@@ -80,14 +103,60 @@ class IdentifyResult:
         return self.status == "matched" and self.title is not None
 
 
-# Statuses worth another try: rate limits and the free tier's transient
-# "overloaded" errors (429 + 5xx). Gemini's free tier 503s under load fairly
-# often, and a single scan shouldn't fail because of a momentary blip.
-_RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+# Statuses worth another try: the free tier's transient "overloaded" errors.
+# A single scan shouldn't fail because of a momentary blip.
+#
+# 429 is deliberately NOT here. On Gemini's free tier it means the DAILY quota
+# is gone (measured 2026-08-28: GenerateRequestsPerDayPerProjectPerModel-
+# FreeTier, limit 20 per day PER MODEL), not "slow down for a second". Retrying
+# cannot succeed, and with only twenty requests a day to spend, burning three
+# of them on a refusal that was never going to change is the expensive mistake.
+_RETRY_STATUS = frozenset({500, 502, 503, 504})
+
+
+# Timing, measured against the live free tier 2026-08-28 while it was
+# congested. Latency is strongly BIMODAL: a call either comes back in 1-4s or
+# it grinds for 30-50s, and the slow ones are as likely to end in 503 as in an
+# answer. Seven models sampled, every one showing the same shape.
+#
+# That shape decides the strategy. A long per-attempt timeout mostly buys
+# waiting: it turns a fast retry into a slow one without improving the odds,
+# and 40s x 3 was a 123-second wait to be told it failed. A SHORT timeout with
+# MORE attempts plays the fast path repeatedly, which is where the answers are.
+#
+# So: cut each attempt off at 12s (fast successes land well inside it), and
+# govern the whole thing with a wall-clock budget instead of a fixed count, so
+# quick 503s buy extra tries while slow ones do not blow the budget.
+#
+# Attempts stay at THREE despite the bimodal odds arguing for more. The free
+# tier allows only twenty requests per day per model, so every retry is a
+# meaningful fraction of a day's scanning: six attempts would let three failed
+# scans consume the entire daily allowance. Quota, not latency, is the binding
+# constraint here.
+_TIMEOUT = 12.0
+_DEADLINE = 45.0
+_ATTEMPTS = 3
+
+# Our own synthetic status for "the server never answered in time". Not a real
+# HTTP code from the service -- it exists so a timeout reports as the transient
+# it almost always is, instead of surfacing a raw socket error.
+_TIMED_OUT = 408
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    """A read/connect timeout, as opposed to a genuinely dead network.
+
+    Worth separating: a timeout means the service is slow (retry, and tell the
+    user it is busy), while a refused or unroutable connection means there is
+    no network at all (say so -- that is actionable, "busy" is not)."""
+    return isinstance(exc, TimeoutError) or isinstance(
+        getattr(exc, "reason", None), TimeoutError)
 
 
 def _http(method: str, url: str, headers: dict, body: bytes,
-          timeout: float = 40.0, *, attempts: int = 3, backoff: float = 1.0):
+          timeout: float = _TIMEOUT, *, attempts: int = _ATTEMPTS,
+          backoff: float = 0.5, deadline: float = _DEADLINE):
+    started = time.monotonic()
     last = (0, {})
     for i in range(attempts):
         try:
@@ -104,12 +173,19 @@ def _http(method: str, url: str, headers: dict, body: bytes,
             except json.JSONDecodeError:
                 payload = {"raw": raw[:300]}
             last = (exc.code, payload)
-            if exc.code not in _RETRY_STATUS or i == attempts - 1:
+            if exc.code not in _RETRY_STATUS:
                 return exc.code, payload
-        except OSError:                       # connection error / timeout
-            if i == attempts - 1:
-                raise
-        time.sleep(backoff * (2 ** i))        # 1s, 2s between tries
+        except OSError as exc:
+            if not _is_timeout(exc):          # no network — do not dress it up
+                if i == attempts - 1:
+                    raise
+            else:
+                last = (_TIMED_OUT, {"error": {"message": (
+                    f"no response within {timeout:.0f}s")}})
+        # Stop on the attempt cap or the time budget, whichever comes first.
+        if i == attempts - 1 or (time.monotonic() - started) >= deadline:
+            break
+        time.sleep(min(backoff * (2 ** i), 2.0))
     return last
 
 
@@ -145,8 +221,20 @@ def _err_detail(payload) -> str:
 def _status_note(status: int, payload) -> str:
     """A human-readable note for a non-200 vision response. Keeps the numeric
     status (useful for debugging) but explains the transient ones plainly."""
-    if status in (429, 503):
-        return (f"the photo service is busy right now ({status}) — "
+    if status == _TIMED_OUT:
+        # We gave up waiting rather than being refused. Under load the service
+        # stalls instead of saying no, so this is the same condition as a 503
+        # and deserves the same plain explanation, not a socket error.
+        return ("the photo service is slow right now — it didn't answer in "
+                "time; try again in a moment")
+    if status == 429:
+        # A daily cap, not a momentary one — "try again in a moment" would be
+        # actively misleading. Say what ran out and what to do about it.
+        return ("today's free photo scans for this model are used up (429) — "
+                "they reset tomorrow, or pick another model on the keystore "
+                "(each model has its own daily allowance)")
+    if status == 503:
+        return ("the photo service is busy right now (503) — "
                 "try again in a moment")
     if status in (500, 502, 504):
         return f"the photo service had a temporary error ({status}) — try again"
@@ -176,17 +264,27 @@ def _call_anthropic(image_b64, media_type, prompt, api_key, model, transport):
     return text, None
 
 
-def _call_openai(image_b64, media_type, prompt, api_key, model, base_url, transport):
+def _call_openai(image_b64, media_type, prompt, api_key, model, base_url, transport,
+                 extra=None):
     """OpenAI-compatible chat/completions (Gemini free tier, Ollama, etc.).
-    Returns (model_text, error_note)."""
+    Returns (model_text, error_note).
+
+    `extra` merges endpoint-specific fields into the request body. It exists
+    for reasoning models: a local qwen3.5 spends its whole token budget in a
+    `reasoning` field and returns EMPTY content, which looks exactly like a
+    broken model. Sending reasoning_effort="none" fixed that and cut the call
+    from 10s to 0.8s. It is per-endpoint rather than global because other
+    providers reject unknown fields."""
     url = base_url.rstrip("/") + "/chat/completions"
-    body = json.dumps({
+    payload = {
         "model": model, "max_tokens": 2048,
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {
                 "url": f"data:{media_type};base64,{image_b64}"}}]}],
-    }).encode()
+    }
+    payload.update(extra or {})
+    body = json.dumps(payload).encode()
     headers = {"Authorization": "Bearer " + api_key,
                "content-type": "application/json"}
     status, payload = transport("POST", url, headers, body)
@@ -195,16 +293,24 @@ def _call_openai(image_b64, media_type, prompt, api_key, model, base_url, transp
     choices = payload.get("choices") or []
     if not choices:
         return None, "identify service returned no content"
-    content = (choices[0].get("message") or {}).get("content", "")
+    message = choices[0].get("message") or {}
+    content = message.get("content", "")
     # Some hosts return content as a list of parts; join text parts.
     if isinstance(content, list):
         content = "".join(p.get("text", "") for p in content
                           if isinstance(p, dict))
+    # A reasoning model that ran out of budget mid-thought leaves content empty
+    # and the answer stranded in `reasoning`. Salvage it rather than reporting
+    # "no content" -- the model did the work, it just never got to the JSON.
+    if not str(content).strip():
+        thought = message.get("reasoning") or message.get("thinking") or ""
+        if str(thought).strip():
+            return str(thought), None
     return content, None
 
 
 def _model_text(image_b64, media_type, prompt, *, provider, api_key, model,
-                base_url, transport):
+                base_url, transport, extra=None):
     """Resolve provider/key/model, call the vision model, return (text, err)."""
     provider = (provider or os.environ.get("VISION_PROVIDER")
                 or "anthropic").lower()
@@ -225,7 +331,7 @@ def _model_text(image_b64, media_type, prompt, *, provider, api_key, model,
         if not base:
             return None, "no vision base URL configured"
         return _call_openai(image_b64, media_type, prompt, api_key, model,
-                            base, transport)
+                            base, transport, extra)
     except urllib.error.URLError as exc:
         return None, f"unreachable: {exc.reason}"
     except Exception as exc:                            # noqa: BLE001
@@ -255,14 +361,26 @@ def _resolve_title(raw, variant, confidence) -> IdentifyResult:
 def identify_cover(image_b64: str, media_type: str = "image/jpeg", *,
                    provider: str | None = None, api_key: str | None = None,
                    model: str | None = None, base_url: str | None = None,
-                   transport: Callable = _http) -> IdentifyResult:
+                   transport: Callable = _http,
+                   candidates: list | None = None,
+                   extra: dict | None = None) -> IdentifyResult:
     """Identify one game from one photo. Never raises — failures become a status.
 
     provider: "anthropic" (default) or "gemini" / "openai" (OpenAI-compatible).
+    candidates: visually similar titles from the CLIP index. When supplied the
+        model is asked to CHOOSE from them (while still allowed to say none),
+        which is far easier than producing the canonical string unaided.
+    extra: endpoint-specific request fields (see _call_openai).
     """
-    text, err = _model_text(image_b64, media_type, _PROMPT_SINGLE,
+    names = [c.get("title") if isinstance(c, dict) else str(c)
+             for c in (candidates or [])]
+    names = [n for n in names if n]
+    prompt = (_PROMPT_SHORTLIST.format(
+                  candidates="\n".join(f"- {n}" for n in names))
+              if names else _PROMPT_SINGLE)
+    text, err = _model_text(image_b64, media_type, prompt,
                             provider=provider, api_key=api_key, model=model,
-                            base_url=base_url, transport=transport)
+                            base_url=base_url, transport=transport, extra=extra)
     if err:
         return IdentifyResult(status="error", note=err)
     data = _extract_json(text or "")
