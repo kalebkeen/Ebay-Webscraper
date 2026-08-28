@@ -78,6 +78,28 @@ h1{
   padding:6px 11px;font-size:12px;cursor:pointer;
 }
 .scan.off .scan-stop{display:none}
+/* Live cover/spine capture: a shutter button + a portrait guide, shown only
+   while capturing (the barcode reticle is hidden then). */
+.scan-capture{
+  position:absolute;left:50%;bottom:12px;transform:translateX(-50%);
+  background:#5b6ee1;border:1px solid rgba(255,255,255,.25);color:#fff;
+  border-radius:999px;padding:11px 24px;font-size:14px;font-weight:600;
+  cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.35);
+}
+.scan:not(.capturing) .scan-capture{display:none}
+.scan.capturing .reticle{display:none}
+.cap-guide{position:absolute;inset:8% 22%;border:2px dashed rgba(255,255,255,.5);
+  border-radius:8px;pointer-events:none}
+.scan:not(.capturing) .cap-guide{display:none}
+
+/* ---- outcome logging (buy / open flips) ---- */
+.bought{display:flex;gap:8px;margin-top:10px}
+.bought input,.flip-sell input{
+  flex:0 0 100px;background:var(--slate);border:1px solid var(--edge);
+  color:var(--paper);border-radius:8px;padding:8px 10px;font-size:14px}
+.flip{display:flex;flex-direction:column;gap:6px;padding:8px 0}
+.flip + .flip{border-top:1px solid var(--edge)}
+.flip-sell{display:flex;gap:8px}
 
 /* ---- search ---- */
 .field{position:relative;margin-bottom:12px}
@@ -197,6 +219,22 @@ input::placeholder{color:var(--dim)}
 .spinner{color:var(--mist);font-family:'IBM Plex Mono',monospace;font-size:12px;
   text-align:center;padding:26px}
 
+.chip.sealed{margin-left:auto}
+.tier{margin-top:7px;font-size:12px;color:var(--dim);line-height:1.4}
+.tier b{color:var(--fg);font-weight:600}
+.tier.warn{color:#ffb4a2}
+
+/* ---- setup / keys ---- */
+.setup{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+       padding:12px 14px;margin-bottom:14px}
+.setup summary{cursor:pointer;font-size:13px;font-weight:600;letter-spacing:.01em}
+.setup .muted{font-size:12px;line-height:1.45;color:var(--dim);margin:8px 0}
+.skey{display:block;margin:10px 0 4px;font-size:12px;color:var(--dim)}
+.skey input{width:100%;margin-top:5px;background:var(--bg);color:var(--fg);
+            border:1px solid var(--line);border-radius:9px;padding:10px 11px;
+            font-size:16px;font-family:inherit}
+#keyState{margin-top:9px;font-size:12px}
+
 /* ---- teach a new code ---- */
 .teach{background:rgba(91,110,225,.1);border:1px solid rgba(91,110,225,.4);
   border-radius:11px;padding:13px;margin-top:12px}
@@ -233,7 +271,20 @@ input::placeholder{color:var(--dim)}
   </button>
   <video id="video" playsinline muted></video>
   <div class="reticle"></div>
+  <div class="cap-guide"></div>
   <button class="scan-stop" id="scanStop">Stop</button>
+  <button class="scan-capture" id="scanCapture" type="button">Capture</button>
+</div>
+
+<div class="field">
+  <input type="file" id="photo" accept="image/*" hidden>
+  <input type="file" id="shelf" accept="image/*" hidden>
+  <button class="btn" id="coverScanBtn">Scan a cover</button>
+  <button class="btn" id="shelfScanBtn">Scan a shelf</button>
+  <button class="btn ghost" id="photoBtn">Cover from a photo</button>
+  <button class="btn ghost" id="shelfBtn">Shelf from a photo</button>
+  <div id="photoState" class="muted"></div>
+  <div id="photoResult"></div>
 </div>
 
 <div class="field">
@@ -243,6 +294,64 @@ input::placeholder{color:var(--dim)}
 </div>
 
 <div id="teach"></div>
+<div id="flips"></div>
+
+<details id="setup" class="setup">
+  <summary>Barcode lookup &amp; API keys</summary>
+  <p class="muted">
+    Without a key, a scanned barcode has nothing to resolve against and you
+    type the title by hand. Keys are stored only on this device.
+  </p>
+
+  <label class="skey">eBay client ID
+    <input type="text" id="s_ebay_id" autocomplete="off" spellcheck="false">
+  </label>
+  <label class="skey">eBay client secret
+    <input type="password" id="s_ebay_secret" autocomplete="off">
+  </label>
+  <p class="muted">
+    Best barcode source — eBay knows the <b>pressing</b>, so a scan returns
+    black label vs Greatest Hits, not just the game. developer.ebay.com
+  </p>
+
+  <label class="skey">ScanDex token
+    <input type="password" id="s_scandex" autocomplete="off">
+  </label>
+  <p class="muted">
+    Fallback covering ~3,457 PS2 barcodes. Identifies the game only; you
+    still confirm the variant. Free at scandex.gamery.app
+  </p>
+
+  <button class="btn" id="saveKeys">Save keys</button>
+  <div id="keyState" class="muted"></div>
+
+  <hr>
+  <p class="muted">
+    <b>Key server (optional).</b> Point this at your desktop keystore and the
+    app fetches the current keys itself — never paste a service key on the phone
+    again. Over Tailscale just the URL is needed (Tailscale is the auth); the
+    token is only for non-Tailscale access. URL looks like
+    http://&lt;desktop&gt;.&lt;tailnet&gt;.ts.net:8787
+  </p>
+  <label class="skey">Keystore URL
+    <input type="text" id="s_ks_url" autocomplete="off" spellcheck="false"
+           inputmode="url">
+  </label>
+  <label class="skey">Keystore token <span class="muted">(optional over Tailscale)</span>
+    <input type="password" id="s_ks_token" autocomplete="off">
+  </label>
+  <button class="btn" id="saveKeystore">Save server</button>
+  <button class="btn" id="syncKeys">Sync now</button>
+  <div id="syncState" class="muted"></div>
+
+  <p class="muted">
+    Confirmed barcodes and photos back up to the key server automatically, and
+    anything captured offline is kept on this phone and retried later. Losing or
+    resetting this phone won't lose the spines you've verified.
+  </p>
+  <button class="btn" id="backupData">Back up scans &amp; photos now</button>
+  <div id="backupState" class="muted"></div>
+</details>
 
 <div class="group">
   <div class="glab">Variant</div>
@@ -254,12 +363,14 @@ input::placeholder{color:var(--dim)}
 </div>
 
 <div class="group">
-  <div class="glab">What's in the case</div>
-  <div class="chips" id="completeness">
-    <button class="chip" data-v="loose" aria-pressed="true">Disc only</button>
-    <button class="chip" data-v="disc_case" aria-pressed="false">+ Case</button>
-    <button class="chip" data-v="cib" aria-pressed="false">+ Manual</button>
+  <div class="glab">What's included</div>
+  <div class="chips" id="included">
+    <button class="chip" data-part="disc"   aria-pressed="true">Disc</button>
+    <button class="chip" data-part="case"   aria-pressed="false">Case</button>
+    <button class="chip" data-part="manual" aria-pressed="false">Manual</button>
+    <button class="chip sealed" data-part="sealed" aria-pressed="false">Sealed</button>
   </div>
+  <div class="tier" id="tierNote"></div>
 </div>
 
 <div class="group">
@@ -297,7 +408,69 @@ function wireChips(id, key, cast){
   });
 }
 wireChips('variant','variant');
-wireChips('completeness','completeness');
+
+/* ---- what's included: components -> pricing tier ---- */
+const parts = {disc:true, case:false, manual:false, sealed:false};
+
+function partBtn(name){
+  return document.querySelector(`#included [data-part="${name}"]`);
+}
+function paintParts(){
+  for(const k in parts) partBtn(k).setAttribute('aria-pressed', String(parts[k]));
+  // Sealed describes the whole item, not a component, so the others are
+  // meaningless alongside it.
+  ['disc','case','manual'].forEach(k=>{
+    partBtn(k).disabled = parts.sealed;
+    partBtn(k).style.opacity = parts.sealed ? .35 : 1;
+  });
+}
+
+/* The enum has four usable tiers, and the checkbox grid can express
+   combinations none of them name. Each mapping below is a deliberate
+   choice, not a default. */
+function deriveTier(){
+  if(parts.sealed) return {v:'sealed', note:
+    `<b>Sealed</b> — a different market with its own grading and resealing
+     fraud. Prices here come from used-disc comps, so this is refused rather
+     than guessed.`, warn:true};
+
+  if(!parts.disc){
+    if(!parts.case && !parts.manual) return {v:null, note:'Select what you have.', warn:true};
+    return {v:'no_disc', note:
+      `<b>No disc</b> — packaging only. Worth a few dollars whatever the game,
+       and there is no comp source for it.`, warn:true};
+  }
+  if(parts.case && parts.manual) return {v:'cib', note:
+    `<b>Complete</b> — disc, case and manual.`};
+  if(parts.case) return {v:'disc_case', note:
+    `<b>Disc + case</b>, no manual. Closer to loose money than to complete:
+     roughly two thirds of the complete premium is the manual.`};
+  if(parts.manual) return {v:'disc_case', note:
+    `<b>Disc + manual</b>, no case. Priced as disc+case — the conservative
+     read. A generic case costs a pound or two, so this is the cheapest
+     upgrade to complete you will find.`};
+  return {v:'loose', note:`<b>Disc only</b>.`};
+}
+
+function applyParts(){
+  paintParts();
+  const t = deriveTier();
+  state.completeness = t.v || 'loose';
+  const el = $('#tierNote');
+  el.innerHTML = t.note;
+  el.className = 'tier' + (t.warn ? ' warn' : '');
+  if(t.v) value(); else $('#out').innerHTML = '';
+}
+
+$('#included').addEventListener('click', e=>{
+  const b = e.target.closest('button'); if(!b || b.disabled) return;
+  const k = b.dataset.part;
+  parts[k] = !parts[k];
+  if(k === 'sealed' && parts.sealed){ parts.disc = parts.case = parts.manual = false; }
+  if(k !== 'sealed' && parts[k]) parts.sealed = false;
+  applyParts();
+});
+applyParts();
 wireChips('pickup','pickup', v=>v==='1');
 
 let askTimer;
@@ -312,6 +485,312 @@ $('#ask').addEventListener('input', e=>{
 
 /* ------------------------------------------------------------------ */
 /* title search                                                        */
+/* ---- API keys ---- */
+async function loadKeys(){
+  try{
+    const d = await (await fetch('/api/settings')).json();
+    if(!d.available) return;
+    const f = d.fields || {};
+    if(f.ebay_client_id && f.ebay_client_id.set)
+      $('#s_ebay_id').value = f.ebay_client_id.hint;
+    for(const [id,key] of [['s_ebay_secret','ebay_client_secret'],
+                           ['s_scandex','scandex_token']]){
+      if(f[key] && f[key].set) $('#'+id).placeholder = 'saved ' + f[key].hint;
+    }
+    if(f.keystore_url && f.keystore_url.set) $('#s_ks_url').value = f.keystore_url.hint;
+    if(f.keystore_token && f.keystore_token.set)
+      $('#s_ks_token').placeholder = 'saved ' + f.keystore_token.hint;
+    showKeyState(d);
+  }catch(e){ /* settings are optional */ }
+}
+
+function showKeyState(d){
+  const bits = [];
+  bits.push(d.ebay_ready ? 'eBay: on (variant-accurate)' : 'eBay: off');
+  bits.push(d.scandex_ready ? 'ScanDex: on' : 'ScanDex: off');
+  $('#keyState').textContent = bits.join(' · ');
+  // Nudge the panel open while nothing is configured, because a scan cannot
+  // resolve a title without at least one of these.
+  if(!d.ebay_ready && !d.scandex_ready) $('#setup').open = true;
+}
+
+$('#saveKeys').addEventListener('click', async ()=>{
+  const payload = {};
+  const id = $('#s_ebay_id').value.trim();
+  const sec = $('#s_ebay_secret').value.trim();
+  const sd = $('#s_scandex').value.trim();
+  if(id) payload.ebay_client_id = id;
+  if(sec) payload.ebay_client_secret = sec;
+  if(sd) payload.scandex_token = sd;
+  if(!Object.keys(payload).length){ $('#keyState').textContent = 'Nothing to save.'; return; }
+  $('#keyState').textContent = 'Saving…';
+  try{
+    const r = await fetch('/api/settings', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    const d = await r.json();
+    if(!r.ok){ $('#keyState').textContent = d.detail || 'Could not save.'; return; }
+    $('#s_ebay_secret').value = ''; $('#s_scandex').value = '';
+    showKeyState(d);
+    $('#keyState').textContent += ' — saved.';
+  }catch(e){ $('#keyState').textContent = 'Could not save: ' + e.message; }
+});
+
+$('#saveKeystore').addEventListener('click', async ()=>{
+  const payload = {};
+  const url = $('#s_ks_url').value.trim();
+  const tok = $('#s_ks_token').value.trim();
+  if(url) payload.keystore_url = url;
+  if(tok) payload.keystore_token = tok;
+  if(!Object.keys(payload).length){ $('#syncState').textContent = 'Enter at least a URL.'; return; }
+  $('#syncState').textContent = 'Saving…';
+  try{
+    const r = await fetch('/api/settings', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    if(!r.ok){ const d = await r.json(); $('#syncState').textContent = d.detail || 'Could not save.'; return; }
+    $('#s_ks_token').value = '';
+    $('#syncState').textContent = 'Saved. Tap “Sync now”.';
+  }catch(e){ $('#syncState').textContent = 'Could not save: ' + e.message; }
+});
+
+async function syncKeys(quiet){
+  if(!quiet) $('#syncState').textContent = 'Syncing…';
+  try{
+    const r = await fetch('/api/keystore/sync', {method:'POST'});
+    const d = await r.json();
+    if(!d.ok){ if(!quiet) $('#syncState').textContent = d.detail || 'Sync failed.'; return; }
+    const n = (d.synced||[]).length;
+    $('#syncState').textContent = n ? ('Synced ' + n + ' key(s) from server.')
+                                    : 'Up to date with server.';
+    loadKeys();
+  }catch(e){ if(!quiet) $('#syncState').textContent = 'Sync failed: ' + e.message; }
+}
+$('#syncKeys').addEventListener('click', ()=>syncKeys(false));
+
+async function backupData(quiet){
+  if(!quiet) $('#backupState').textContent = 'Backing up…';
+  try{
+    const r = await fetch('/api/vault/sync', {method:'POST'});
+    const d = await r.json();
+    if(!d.ok){ if(!quiet) $('#backupState').textContent = d.detail || 'Backup failed.'; return; }
+    let msg = 'Backed up ' + (d.backed_up||0) +
+      ', restored ' + (d.pulled_into_local||0) + ' (vault has ' + (d.vault_total||0) + ').';
+    if(d.photos_synced || d.photos_pending)
+      msg += ' Photos: ' + (d.photos_synced||0) + ' synced'
+           + (d.photos_pending ? ', ' + d.photos_pending + ' waiting' : '') + '.';
+    if(d.covers_total)
+      msg += ' ' + d.covers_total + ' covers available offline.';
+    $('#backupState').textContent = msg;
+  }catch(e){ if(!quiet) $('#backupState').textContent = 'Backup failed: ' + e.message; }
+}
+$('#backupData').addEventListener('click', ()=>backupData(false));
+
+loadKeys();
+// Best-effort refresh from the desktop keystore on load; silent if unconfigured.
+syncKeys(true);
+backupData(true);
+
+/* The offline cover hash.
+
+   The phone bundle is stdlib-only and has no image decoder, so when the desktop
+   cannot be reached this is the ONLY thing standing between a cover and no
+   answer at all. It must stay byte-identical to vault._boxhash_rgba() in the
+   Python -- the hashes it is compared against were computed there -- so any
+   change to one has to be mirrored in the other. A divergence would not raise
+   anything; offline matching would simply stop working, and you would not find
+   out until you were somewhere with no signal.
+
+   Scale into a fixed 144x128 buffer (9x8 cells of exactly 16x16 pixels), take
+   ITU-R 601-2 luma, average each cell with integer division, then compare
+   horizontally adjacent cells for 8 rows x 8 comparisons = 64 bits. */
+function coverHash(drawable){
+  const W = 9, H = 8, CELL = 16, w = W*CELL, h = H*CELL;
+  try{
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d', {willReadFrequently:true});
+    ctx.drawImage(drawable, 0, 0, w, h);
+    const px = ctx.getImageData(0, 0, w, h).data;
+    const total = new Array(W*H).fill(0), count = new Array(W*H).fill(0);
+    for(let y=0; y<h; y++){
+      const gy = (y*H/h)|0, row = y*w*4;
+      for(let x=0; x<w; x++){
+        const i = row + x*4, k = gy*W + ((x*W/w)|0);
+        total[k] += px[i]*299 + px[i+1]*587 + px[i+2]*114;
+        count[k] += 1;
+      }
+    }
+    // 64 bits will not fit in a JS number, so emit hex a nibble at a time.
+    let hex = '', nib = 0, n = 0;
+    for(let r=0; r<H; r++){
+      for(let col=0; col<W-1; col++){
+        const k = r*W + col;
+        const a = count[k] ? Math.floor(total[k]/count[k]) : 0;
+        const b = count[k+1] ? Math.floor(total[k+1]/count[k+1]) : 0;
+        nib = (nib<<1) | (a > b ? 1 : 0);
+        if(++n === 4){ hex += nib.toString(16); nib = 0; n = 0; }
+      }
+    }
+    return hex;
+  }catch(e){
+    return '';        // no 2d context or a tainted canvas: skip offline matching
+  }
+}
+
+/* ---- identify from a photo ---- */
+(function(){
+  const btn = $('#photoBtn'), input = $('#photo');
+  const state = $('#photoState'), out = $('#photoResult');
+  if(!btn) return;
+  const esc = s => (s||'').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const money = n => (n==null) ? '—' : ('$' + Number(n).toFixed(2));
+  let lastImage = '';
+
+  btn.addEventListener('click', ()=> input.click());
+  input.addEventListener('change', async ()=>{
+    const file = input.files && input.files[0];
+    if(!file) return;
+    out.innerHTML = ''; state.textContent = 'Reading photo…';
+    try{
+      const shot = await shrink(file, 1280, 0.8);
+      lastImage = shot.b64;
+      state.textContent = 'Identifying…';
+      const r = await fetch('/api/identify', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({image: shot.b64, phash: shot.phash,
+                              media_type: 'image/jpeg'})});
+      render(await r.json());
+    }catch(e){ state.textContent = 'Could not identify: ' + e.message; }
+    input.value = '';
+  });
+
+  // Downscale in the browser to keep the upload small and the cost down.
+  // Also returns the offline cover hash, computed from the same decoded image.
+  function shrink(file, maxDim, quality){
+    return new Promise((resolve, reject)=>{
+      const img = new Image(), url = URL.createObjectURL(file);
+      img.onload = ()=>{
+        URL.revokeObjectURL(url);
+        let w = img.width, h = img.height;
+        const s = Math.min(1, maxDim / Math.max(w, h));
+        w = Math.round(w*s); h = Math.round(h*s);
+        const c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        resolve({b64: c.toDataURL('image/jpeg', quality).split(',', 2)[1],
+                 phash: coverHash(img)});
+      };
+      img.onerror = ()=>{ URL.revokeObjectURL(url); reject(new Error('bad image')); };
+      img.src = url;
+    });
+  }
+
+  function render(d){
+    if(d.status === 'error'){
+      // When everything failed we are almost certainly offline. The server
+      // tells us why the offline table could not save it, which turns a dead
+      // end into something the user can act on.
+      state.textContent = (d.note || 'Photo identify is unavailable.')
+                        + (d.offline_note ? ' · ' + d.offline_note : '');
+      return;
+    }
+    if(d.status === 'no_game'){ state.textContent = d.note || 'No PS2 game found in that photo.'; return; }
+    if(d.status === 'unmatched'){
+      state.textContent = d.note || ('Read a title but no catalog match.');
+      if(d.raw_title){ $('#q').value = d.raw_title; $('#q').dispatchEvent(new Event('input')); }
+      return;
+    }
+    state.textContent = '';
+    const p = d.price || {};
+    let line = p.quotable ? ('Max bid ' + money(p.max_bid) + ' · resale ~' + money(p.expected_resale)
+                             + (p.days_to_sell ? ' · ~' + Math.round(p.days_to_sell) + 'd to sell' : ''))
+             : (d.price_error || (p.warnings && p.warnings[0]) || 'no price data yet');
+    const src = d.source === 'photo-index' ? ' · from your library'
+              : d.source === 'offline-covers' ? ' · matched offline' : '';
+    out.innerHTML =
+      '<div class="card">' +
+      '<div><b>' + esc(d.title) + '</b> <span class="muted">(' + esc(d.confidence) + ' confidence' + src + ')</span></div>' +
+      (d.variant && d.variant !== 'unknown' ? '<div class="muted">variant: ' + esc(d.variant) + '</div>' : '') +
+      '<div>' + esc(line) + '</div>' +
+      '<div class="muted">Best-guess ID — check the spine before you pay.</div>' +
+      '<div style="margin-top:6px"><button class="btn" id="idOk">Looks right</button> ' +
+      '<button class="btn ghost" id="idNo">Not this game</button></div>' +
+      '</div>';
+    $('#idOk').addEventListener('click', ()=>{
+      // Grow the photo library so this cover is free next time.
+      if(lastImage) fetch('/api/identify/remember', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({image:lastImage, title:d.title, variant:d.variant})}).catch(()=>{});
+      $('#q').value = d.title; $('#q').dispatchEvent(new Event('input'));
+      out.innerHTML = ''; state.textContent = 'Confirmed — saved to your library.';
+    });
+    $('#idNo').addEventListener('click', ()=>{ out.innerHTML=''; state.textContent=''; });
+  }
+
+  // ---- shelf: one photo -> many titles ----
+  const sBtn = $('#shelfBtn'), sInput = $('#shelf');
+  sBtn.addEventListener('click', ()=> sInput.click());
+  sInput.addEventListener('change', async ()=>{
+    const file = sInput.files && sInput.files[0];
+    if(!file) return;
+    out.innerHTML = ''; state.textContent = 'Reading photo…';
+    try{
+      const shot = await shrink(file, 1400, 0.8);
+      state.textContent = 'Identifying games…';
+      // No phash: a shelf is several covers in one frame, so a whole-image
+      // hash describes none of them. Shelves stay a vision-model job.
+      const r = await fetch('/api/identify/shelf', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({image: shot.b64, media_type: 'image/jpeg'})});
+      renderShelf(((await r.json()).results) || []);
+    }catch(e){ state.textContent = 'Could not identify: ' + e.message; }
+    sInput.value = '';
+  });
+
+  // Shared with the live-camera capture below: a captured frame (already a
+  // base64 JPEG) goes through the same identify + render + confirm path as a
+  // picked photo, so covers scanned in-app behave exactly like uploaded ones.
+  window.__identifyCover = async function(b64, phash){
+    lastImage = b64; out.innerHTML = ''; state.textContent = 'Identifying…';
+    try{
+      const r = await fetch('/api/identify', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({image: b64, phash: phash || '',
+                              media_type: 'image/jpeg'})});
+      render(await r.json());
+    }catch(e){ state.textContent = 'Could not identify: ' + e.message; }
+  };
+  window.__identifyShelf = async function(b64){
+    out.innerHTML = ''; state.textContent = 'Identifying games…';
+    try{
+      const r = await fetch('/api/identify/shelf', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({image: b64, media_type: 'image/jpeg'})});
+      renderShelf(((await r.json()).results) || []);
+    }catch(e){ state.textContent = 'Could not identify: ' + e.message; }
+  };
+
+  function renderShelf(list){
+    if(list.length === 1 && list[0].status === 'error'){ state.textContent = list[0].note || 'Identify unavailable.'; return; }
+    const matched = list.filter(x => x.status === 'matched');
+    const unmatched = list.filter(x => x.status === 'unmatched');
+    if(!matched.length && !unmatched.length){ state.textContent = 'No PS2 games found in that photo.'; return; }
+    state.textContent = matched.length + ' game' + (matched.length===1?'':'s') + ' found'
+      + (unmatched.length ? ' · ' + unmatched.length + ' unrecognized' : '');
+    let html = '<div class="card"><div class="muted">Best-guess IDs — check the spines before you pay.</div>';
+    for(const d of matched){
+      const p = d.price || {};
+      const line = p.quotable ? ('max bid ' + money(p.max_bid) + ' · resale ~' + money(p.expected_resale))
+                              : (d.price_error || 'no price data');
+      html += '<div style="margin-top:8px"><b>' + esc(d.title) + '</b> <span class="muted">(' + esc(d.confidence) + ')</span>'
+            + '<br><span class="muted">' + esc(line) + '</span></div>';
+    }
+    for(const d of unmatched){
+      html += '<div style="margin-top:8px" class="muted">read “' + esc(d.raw_title||'') + '” — not in catalog</div>';
+    }
+    out.innerHTML = html + '</div>';
+  }
+})();
+
 let qTimer;
 $('#q').addEventListener('input', e=>{
   clearTimeout(qTimer);
@@ -357,10 +836,62 @@ function setChip(group, v){
 
 /* ------------------------------------------------------------------ */
 /* barcode                                                             */
-let stream = null, detector = null, raf = null;
+let stream = null, detector = null, raf = null, captureMode = null;
 
 $('#scanStart').addEventListener('click', startScan);
 $('#scanStop').addEventListener('click', stopScan);
+$('#coverScanBtn').addEventListener('click', ()=> startCoverScan('cover'));
+$('#shelfScanBtn').addEventListener('click', ()=> startCoverScan('shelf'));
+$('#scanCapture').addEventListener('click', captureFrame);
+
+/* Live cover/spine capture. The barcode scanner uses the native ML Kit
+   scanner (SpineNative); this instead opens the WebView's own camera via
+   getUserMedia -- which the app grants -- shows a live preview, and on tap
+   grabs the frame and sends it down the same identify path as a picked photo.
+   No barcode detection here; the user is aiming at box art, not a barcode. */
+async function startCoverScan(mode){
+  if(!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)){
+    note('This device has no camera access here. Use “from a photo” instead.');
+    return;
+  }
+  stopScan();                                   // release any active stream
+  captureMode = mode;
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:'environment',
+             width:{ideal:1920}, height:{ideal:1080}}});
+    $('#video').srcObject = stream;
+    await $('#video').play();
+    $('#scanCapture').textContent = mode === 'shelf' ? 'Capture shelf'
+                                                     : 'Capture cover';
+    const scan = $('#scan');
+    scan.classList.remove('off');
+    scan.classList.add('on', 'capturing');
+  }catch(err){
+    captureMode = null;
+    note('Camera unavailable: ' + err.message + '. Use “from a photo” instead.');
+  }
+}
+
+function captureFrame(){
+  const v = $('#video');
+  if(!stream || !v.videoWidth){ return; }
+  const mode = captureMode;
+  const maxDim = mode === 'shelf' ? 1400 : 1280;
+  const s = Math.min(1, maxDim / Math.max(v.videoWidth, v.videoHeight));
+  const c = document.createElement('canvas');
+  c.width = Math.round(v.videoWidth * s);
+  c.height = Math.round(v.videoHeight * s);
+  c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+  const b64 = c.toDataURL('image/jpeg', 0.8).split(',', 2)[1];
+  // Hash the captured frame while it is still decoded, so a cover shot here
+  // can be resolved offline. Shelves get no hash (see the shelf handler).
+  const phash = mode === 'shelf' ? '' : coverHash(c);
+  if(navigator.vibrate) navigator.vibrate(30);
+  stopScan();                                   // free the camera before the call
+  if(mode === 'shelf') window.__identifyShelf(b64);
+  else window.__identifyCover(b64, phash);
+}
 
 /* Native scanner, when running inside the APK.
    BarcodeDetector is a Chrome API and is NOT reliably exposed in Android's
@@ -380,6 +911,7 @@ function nativeScan(){
 }
 
 async function startScan(){
+  stopScan();                    // release a live cover stream first, if any
   if(window.SpineNative && window.SpineNative.isAvailable &&
      window.SpineNative.isAvailable()){
     try {
@@ -412,8 +944,9 @@ async function startScan(){
 function stopScan(){
   cancelAnimationFrame(raf);
   if(stream) stream.getTracks().forEach(t=>t.stop());
-  stream = null;
-  $('#scan').classList.add('off'); $('#scan').classList.remove('on');
+  stream = null; captureMode = null;
+  $('#scan').classList.add('off');
+  $('#scan').classList.remove('on', 'capturing');
 }
 
 async function tick(){
@@ -437,21 +970,65 @@ async function resolveUpc(code){
     const d = await (await fetch('/api/upc/'+encodeURIComponent(code))).json();
     if(d.known){
       state.pendingUpc = null;
-      $('#teach').innerHTML = '';
       state.title = d.title; $('#q').value = d.title;
+      $('#results').innerHTML = '';
       if(d.variant && d.variant !== 'unknown'){
         setChip('variant', d.variant); state.variant = d.variant;
+      }
+
+      // Say where the answer came from and how far to trust it. A resolved
+      // title with an unconfirmed variant is a 3-5x risk, and silently
+      // preselecting one would hide exactly the thing worth checking.
+      const src = {local:'saved on this device', ebay:'from live eBay listings',
+                   scandex:'from ScanDex'}[d.source] || '';
+      const notes = (d.warnings || []).slice(0, 2);
+      if(src || notes.length || d.needs_variant_check){
+        $('#teach').innerHTML =
+          `<div class="teach">
+             <p><b>${esc(d.title)}</b>${src ? ' — ' + esc(src) : ''}
+                ${d.variant && d.variant !== 'unknown'
+                   ? `· variant <b>${esc(d.variant.replace('_',' '))}</b>` : ''}</p>
+             ${notes.map(w => `<p class="muted">${esc(w)}</p>`).join('')}
+             ${d.source && d.source !== 'local'
+               ? `<button class="btn" id="confirmVariant">Confirm and remember</button>`
+               : ''}
+           </div>`;
+        const cv = $('#confirmVariant');
+        if(cv) cv.addEventListener('click', async ()=>{
+          // Writes the variant you actually see into the local index, so
+          // every later scan of this code answers offline and precisely.
+          await fetch('/api/upc/'+encodeURIComponent(d.upc), {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({title: state.title, variant: state.variant})});
+          $('#teach').innerHTML = '<div class="teach"><p>Saved.</p></div>';
+          setTimeout(()=>{ $('#teach').innerHTML=''; }, 1500);
+        });
+      } else {
+        $('#teach').innerHTML = '';
       }
       value();
     }else{
       state.pendingUpc = d.upc;
       $('#out').innerHTML = '';
+
+      // If anything upstream gave us a name we could not match to the
+      // catalog, seed the search with it -- that usually turns an empty
+      // screen into a one-tap answer.
+      const seed = (d.suggest || '').trim();
       $('#teach').innerHTML =
         `<div class="teach">
-           <p>New code <span class="code">${esc(d.upc)}</span>. Pick the title
-              below and it's saved for next time.</p>
+           <p>New code <span class="code">${esc(d.upc)}</span>.
+              ${seed
+                ? `Scanned as <b>${esc(seed)}</b> — confirm the title below.`
+                : `Type the game\'s name in the box above, then tap it in the
+                   results. It\'s saved for next time.`}</p>
+           ${(d.warnings || []).map(w => `<p class="muted">${esc(w)}</p>`).join('')}
          </div>`;
       $('#q').focus();
+      if(seed){
+        $('#q').value = seed;
+        search(seed);
+      }
     }
   }catch(err){ note('Lookup failed: ' + err.message); }
 }
@@ -477,6 +1054,7 @@ function offerTeach(code, title){
 /* ------------------------------------------------------------------ */
 /* valuation                                                           */
 let valTimer;
+let lastVal = null;
 function value(){
   if(!state.title) return;
   clearTimeout(valTimer);
@@ -515,6 +1093,7 @@ function render(d){
     return;
   }
 
+  lastVal = d;                 // remembered so "I bought this" can log it
   const bid = d.max_bid || 0;
   const hasAsk = d.ask != null;
   const take = hasAsk ? d.take : bid > 0;
@@ -533,6 +1112,9 @@ function render(d){
   }
 
   const notes = [];
+  if(d.needs_verify)
+    notes.push(['warn','Verify before paying — comps for this game disagree; '
+                     + 'confirm the exact variant and condition against the listing.']);
   if(d.repro_risk === 'high')
     notes.push(['warn','High-fake title. Check the disc face and hub codes '
                      + 'before you hand over money.']);
@@ -564,7 +1146,77 @@ function render(d){
       ).join('')}</div>
       ${notes.length ? `<div class="notes">${notes.map(([c,t])=>
         `<div class="note ${c}">${esc(t)}</div>`).join('')}</div>` : ''}
+      <div class="bought">
+        <input type="number" inputmode="decimal" id="paidIn" placeholder="paid $"
+               value="${hasAsk ? Number(d.ask).toFixed(2) : ''}">
+        <button class="btn ghost" id="boughtBtn">I bought this</button>
+      </div>
     </div>`;
+  const bb = $('#boughtBtn');
+  if(bb) bb.addEventListener('click', ()=>{
+    const paid = parseFloat($('#paidIn').value);
+    if(!(paid >= 0)){ $('#paidIn').focus(); return; }
+    logBought(paid);
+  });
+}
+
+async function logBought(paid){
+  if(!lastVal) return;
+  try{
+    await fetch('/api/outcome/buy', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        title: lastVal.title, variant: lastVal.priced_as_variant,
+        completeness: state.completeness, region: 'ntsc_u',
+        paid: paid, ask: (lastVal.ask != null ? lastVal.ask : 0),
+        prediction: {
+          expected_resale: lastVal.expected_resale,
+          conservative_resale: lastVal.conservative_resale,
+          max_bid: lastVal.max_bid, confidence: lastVal.confidence,
+          days_to_sell: lastVal.days_to_sell}})});
+    loadFlips();
+  }catch(e){ note('Could not log the purchase: ' + e.message); }
+}
+
+/* ---- open flips: mark them sold to build the calibration record ---- */
+async function loadFlips(){
+  try{
+    const d = await (await fetch('/api/outcomes')).json();
+    renderFlips(d.open || [], d.stats || {});
+  }catch(e){ /* offline is fine; the log is local */ }
+}
+
+function renderFlips(open, stats){
+  const el = $('#flips');
+  if(!el) return;
+  if(!open.length && !(stats.sold)){ el.innerHTML = ''; return; }
+  let html = '<div class="teach"><p><b>Your flips</b>';
+  if(stats.sold)
+    html += ` <span class="muted">· ${stats.sold} sold, `
+          + `${money(stats.realized_profit||0)} profit</span>`;
+  html += '</p>';
+  for(const f of open){
+    html += `<div class="flip" data-id="${esc(f.id)}">
+      <div>${esc(f.title)} <span class="muted">· paid ${money(f.paid||0)}`
+      + (f.pred_conservative!=null ? ` · est resale ${money(f.pred_conservative)}` : '')
+      + `</span></div>
+      <div class="flip-sell">
+        <input type="number" inputmode="decimal" class="soldIn" placeholder="sold $">
+        <button class="btn soldBtn">Sold</button>
+      </div></div>`;
+  }
+  html += '</div>';
+  el.innerHTML = html;
+  el.querySelectorAll('.flip').forEach(row=>{
+    row.querySelector('.soldBtn').addEventListener('click', async ()=>{
+      const price = parseFloat(row.querySelector('.soldIn').value);
+      if(!(price >= 0)){ row.querySelector('.soldIn').focus(); return; }
+      await fetch('/api/outcome/sell', {method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({id: row.dataset.id, sold_price: price})});
+      loadFlips();
+    });
+  });
 }
 
 function note(msg){
@@ -582,6 +1234,8 @@ fetch('/api/health').then(r=>r.json()).then(d=>{
       + 'still the mock. Swap it in service.py before trusting a number.';
   }
 }).catch(()=>{});
+
+loadFlips();     // show any open flips waiting to be marked sold
 
 if('serviceWorker' in navigator)
   navigator.serviceWorker.register('/sw.js').catch(()=>{});

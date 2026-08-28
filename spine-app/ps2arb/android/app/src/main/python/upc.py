@@ -66,6 +66,43 @@ def normalise(code: str) -> str:
     return digits
 
 
+def _variant_score(entry: dict) -> int:
+    """How much a record's variant is worth in a merge: a user-confirmed known
+    variant beats an imported one beats an unknown. This is what stops a sync
+    from ever downgrading a spine you checked by hand back to 'unknown'."""
+    variant = (entry.get("variant") or "").strip()
+    if not variant or variant == Variant.UNKNOWN.value:
+        return 0
+    return 2 if entry.get("confirmed_by") == "user" else 1
+
+
+def merge_two(a: dict, b: dict) -> dict:
+    """Merge two records for the SAME barcode without losing information.
+
+    The higher-confidence variant wins; times_scanned takes the max (not the
+    sum — the same entry seen on both sides across syncs must not inflate);
+    first_seen keeps the earliest; 'user' confirmation is sticky. Order-
+    independent, so pushing and pulling in either direction converges.
+    """
+    win, other = (a, b) if _variant_score(a) >= _variant_score(b) else (b, a)
+    seens = [x for x in (a.get("first_seen"), b.get("first_seen")) if x]
+    confirmed = "user" if "user" in (a.get("confirmed_by"),
+                                     b.get("confirmed_by")) else \
+                (win.get("confirmed_by") or other.get("confirmed_by") or "user")
+    return {
+        "upc": a.get("upc") or b.get("upc"),
+        "title": win.get("title") or other.get("title") or "",
+        "variant": win.get("variant") or other.get("variant")
+        or Variant.UNKNOWN.value,
+        "region": win.get("region") or other.get("region")
+        or Region.NTSC_U.value,
+        "confirmed_by": confirmed,
+        "first_seen": min(seens) if seens else "",
+        "times_scanned": max(int(a.get("times_scanned") or 0),
+                             int(b.get("times_scanned") or 0)),
+    }
+
+
 def check_digit_ok(code: str) -> bool:
     """UPC-A checksum. Catches a mis-read before it becomes a bad lookup."""
     d = normalise(code)
@@ -122,6 +159,47 @@ class UpcIndex:
         self._by_upc[code] = entry
         self.save()
         return entry
+
+    def all_entries(self) -> list[dict]:
+        """Every record as a plain dict — for backing the index up to the vault."""
+        return [asdict(e) for e in self._by_upc.values()]
+
+    def merge_entries(self, rows: list[dict]) -> int:
+        """Merge records in from the vault (or another device) without clobbering.
+
+        Uses merge_two per barcode, so a pulled record never downgrades a local
+        confirmed variant and never double-counts scans. Returns how many local
+        records changed."""
+        changed = 0
+        for row in rows:
+            code = normalise(str(row.get("upc", "")))
+            if not code or not row.get("title"):
+                continue
+            incoming = {
+                "upc": code,
+                "title": row.get("title") or "",
+                "variant": row.get("variant") or Variant.UNKNOWN.value,
+                "region": row.get("region") or Region.NTSC_U.value,
+                "confirmed_by": row.get("confirmed_by") or "user",
+                "first_seen": row.get("first_seen") or "",
+                "times_scanned": int(row.get("times_scanned") or 0),
+            }
+            existing = self._by_upc.get(code)
+            m = merge_two(asdict(existing), incoming) if existing else incoming
+            new_entry = UpcEntry(
+                upc=code, title=m["title"],
+                variant=m.get("variant", Variant.UNKNOWN.value),
+                region=m.get("region", Region.NTSC_U.value),
+                confirmed_by=m.get("confirmed_by", "user"),
+                first_seen=m.get("first_seen", ""),
+                times_scanned=int(m.get("times_scanned", 0)),
+            )
+            if existing is None or asdict(existing) != asdict(new_entry):
+                self._by_upc[code] = new_entry
+                changed += 1
+        if changed:
+            self.save()
+        return changed
 
     def bulk_load(self, rows: list[dict]) -> int:
         """Import a real dataset. Rows need at least `upc` and `title`."""
