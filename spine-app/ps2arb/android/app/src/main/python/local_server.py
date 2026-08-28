@@ -335,7 +335,9 @@ def _flush_photo_outbox(limit: int = 50) -> dict:
         r = _vault_call("POST", "/v1/vault/photo", {
             "image": item.get("image", ""), "title": item.get("title", ""),
             "variant": item.get("variant") or "unknown",
-            "barcode": item.get("barcode") or ""})
+            "barcode": item.get("barcode") or "",
+            "face": item.get("face") or "front",
+            "source": item.get("source") or "user"})
         if r is None:
             break                                  # unreachable — retry later
         if r.get("ok"):
@@ -731,9 +733,15 @@ class Handler(BaseHTTPRequestHandler):
                 title = body.get("title") or ""
                 if not img or not title:
                     return self._send(400, {"detail": "image and title required"})
+                # `face` and `barcode` matter for the barcode-first capture
+                # flow: a spine photo labelled by a scanned barcode is the
+                # strongest evidence this index can hold, and it is the only
+                # kind that tells us how identification copes with a real case.
                 item = {"image": img, "title": title,
                         "variant": body.get("variant") or "unknown",
-                        "barcode": body.get("barcode") or ""}
+                        "barcode": body.get("barcode") or "",
+                        "face": body.get("face") or "front",
+                        "source": "user"}
                 if _OUTBOX is not None:
                     _OUTBOX.enqueue(item)
                     threading.Thread(target=_flush_photo_outbox, daemon=True,
