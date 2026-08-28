@@ -253,6 +253,7 @@ class Handler(BaseHTTPRequestHandler):
             "/v1/vault/valuations": _all_valuations,
             "/v1/vault/outcomes": _all_outcomes,
             "/v1/vault/phashes": lambda: {"rows": _vault.all_phashes()},
+            "/v1/vault/photo/coverage": _vault.photo_coverage,
             "/v1/vault/stats": _vault.stats,
         }
         if self.path in vault_gets:
@@ -292,7 +293,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/vault/photo":
             return self._send(200, _vault.add_photo(
                 body.get("image") or "", body.get("title") or "",
-                body.get("variant") or "unknown", body.get("barcode") or ""))
+                body.get("variant") or "unknown", body.get("barcode") or "",
+                source=body.get("source") or "user",
+                face=body.get("face") or "front"))
         return self._send(404, {"detail": "no such route"})
 
     def do_PUT(self):

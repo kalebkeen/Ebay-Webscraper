@@ -86,6 +86,8 @@ CREATE TABLE IF NOT EXISTS photo_index (
     file       TEXT,              -- relative filename under PHOTO_DIR
     embedding  TEXT,              -- CLIP embedding as JSON floats, if available
     bhash      TEXT,              -- box-average hash, the one the PHONE matches on
+    source     TEXT DEFAULT 'user',  -- 'seed' (reference art) | 'user' (a real photo)
+    face       TEXT DEFAULT 'front', -- front | back | spine
     created_at TEXT DEFAULT (datetime('now'))
 );
 """
@@ -107,6 +109,18 @@ def _conn() -> sqlite3.Connection:
         conn.commit()
     if "bhash" not in cols:
         conn.execute("ALTER TABLE photo_index ADD COLUMN bhash TEXT")
+        conn.commit()
+    # source/face added 2026-08-28. Everything already stored came from the
+    # cover-seeding campaign, so it backfills to 'seed'/'front' — and that
+    # distinction is the point: a photo of the actual case is worth more than
+    # reference art, and until now the two were indistinguishable.
+    if "source" not in cols:
+        conn.execute("ALTER TABLE photo_index ADD COLUMN source TEXT")
+        conn.execute("UPDATE photo_index SET source='seed' WHERE source IS NULL")
+        conn.commit()
+    if "face" not in cols:
+        conn.execute("ALTER TABLE photo_index ADD COLUMN face TEXT")
+        conn.execute("UPDATE photo_index SET face='front' WHERE face IS NULL")
         conn.commit()
     return conn
 
@@ -376,9 +390,22 @@ def _hamming(a: str, b: str) -> int:
 
 
 def add_photo(image_b64: str, title: str, variant: str = "unknown",
-              barcode: str = "") -> dict:
+              barcode: str = "", source: str = "user",
+              face: str = "front") -> dict:
     """Store a confirmed photo + label. Skips a near-duplicate of a title we
-    already hold, so re-scanning the same game doesn't bloat the set."""
+    already hold, so re-scanning the same game doesn't bloat the set.
+
+    `source` separates reference art pulled from a catalogue ('seed') from a
+    photo of the real case ('user'). They are not equivalent evidence: seeded
+    art is clean and flat, a real photo carries the glare, angle and case
+    plastic that identification actually has to cope with.
+
+    `face` is front | back | spine. Spines matter disproportionately — games
+    sit spine-out on a shelf, which is what the multi-title scan reads.
+
+    A barcode-confirmed label is the strongest one available: the barcode
+    resolved the title, so the photo is not a guess the way a vision model's
+    answer is."""
     import json as _json
     if not _HAVE_PIL:
         return {"ok": False, "detail": "photo index unavailable (no Pillow)"}
@@ -397,8 +424,11 @@ def add_photo(image_b64: str, title: str, variant: str = "unknown",
 
     conn = _conn()
     try:
+        # Dedup within the same face only: a spine and a front cover of the
+        # same game are both wanted, and comparing them would be meaningless.
         for row in conn.execute(
-                "SELECT phash FROM photo_index WHERE title=?", (title,)):
+                "SELECT phash FROM photo_index WHERE title=? "
+                "AND COALESCE(face,'front')=?", (title, face)):
             if _hamming(phash, row["phash"]) <= _DEDUP_DISTANCE:
                 total = conn.execute(
                     "SELECT COUNT(*) FROM photo_index").fetchone()[0]
@@ -407,9 +437,10 @@ def add_photo(image_b64: str, title: str, variant: str = "unknown",
         PHOTO_DIR.mkdir(parents=True, exist_ok=True)
         cur = conn.execute(
             "INSERT INTO photo_index "
-            "(phash,title,variant,barcode,file,embedding,bhash) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (phash, title, variant, barcode, "", emb, bhash))
+            "(phash,title,variant,barcode,file,embedding,bhash,source,face) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (phash, title, variant, barcode, "", emb, bhash,
+             source or "user", face or "front"))
         rid = cur.lastrowid
         fname = f"{rid:06d}_{phash[:8]}.jpg"
         (PHOTO_DIR / fname).write_bytes(raw)
@@ -602,6 +633,47 @@ def backfill_bhash(limit: int = 0) -> dict:
         conn.close()
     return {"ok": True, "filled": filled, "unreadable": missing,
             "remaining": remaining}
+
+
+def photo_coverage(title: str = "") -> dict:
+    """What real photos exist — for one title, or across the library.
+
+    Reference art and photos of the actual case are counted separately on
+    purpose. 337 seeded covers look like broad coverage, but none of them tell
+    you how identification behaves against a real case under shop lighting;
+    only the 'user' rows do."""
+    conn = _conn()
+    try:
+        if title:
+            rows = conn.execute(
+                "SELECT COALESCE(face,'front') AS face, COALESCE(source,'user') "
+                "AS source, COUNT(*) AS n FROM photo_index WHERE title=? "
+                "GROUP BY face, source", (title,)).fetchall()
+            faces = {r["face"] for r in rows if r["source"] == "user"}
+            return {"title": title,
+                    "user_faces": sorted(faces),
+                    "have_user_photo": bool(faces),
+                    "seeded": any(r["source"] == "seed" for r in rows),
+                    "total": sum(r["n"] for r in rows)}
+        rows = conn.execute(
+            "SELECT COALESCE(source,'user') AS source, "
+            "COALESCE(face,'front') AS face, COUNT(*) AS n, "
+            "COUNT(DISTINCT title) AS titles FROM photo_index "
+            "GROUP BY source, face").fetchall()
+    finally:
+        conn.close()
+    out = {"by_source": {}, "user_titles": 0, "seed_titles": 0}
+    for r in rows:
+        out["by_source"].setdefault(r["source"], {})[r["face"]] = r["n"]
+    conn = _conn()
+    try:
+        for src in ("user", "seed"):
+            out[f"{src}_titles"] = conn.execute(
+                "SELECT COUNT(DISTINCT title) FROM photo_index "
+                "WHERE COALESCE(source,'user')=?", (src,)).fetchone()[0]
+    finally:
+        conn.close()
+    return out
 
 
 def photo_titles() -> set:

@@ -173,6 +173,47 @@ def main() -> int:
     check("an indexed cover is labelled photo-index, not local-vision",
           hit.get("matched") and hit.get("via") == "photo-index")
 
+    # --- barcode-labelled capture: source / face / barcode ----------------
+    # A photo taken right after a barcode scan is the best-labelled image this
+    # app can collect, and the only kind that shows a REAL case. It must be
+    # distinguishable from seeded catalogue art, or we cannot tell broad
+    # coverage from useful coverage.
+    vault.add_photo(noise_b64(7001), "Kuon", "black_label",
+                    barcode="012345678905", source="user", face="spine")
+    cov = vault.photo_coverage("Kuon")
+    check("a user photo is recorded as a user photo",
+          cov["have_user_photo"] and cov["user_faces"] == ["spine"])
+    vault.add_photo(noise_b64(7002), "Kuon", "black_label",
+                    barcode="012345678905", source="user", face="front")
+    cov = vault.photo_coverage("Kuon")
+    check("faces accumulate per title",
+          sorted(cov["user_faces"]) == ["front", "spine"])
+
+    # A front and a spine of the same game are both wanted; dedup must not
+    # treat them as the same shot just because the title matches.
+    n_before = vault.stats()["photos"]
+    vault.add_photo(noise_b64(7003), "Kuon", face="back", source="user")
+    check("a different face of the same title is kept",
+          vault.stats()["photos"] == n_before + 1)
+    # ...but a near-identical repeat of the SAME face is still skipped.
+    again = vault.add_photo(noise_b64(7003), "Kuon", face="back", source="user")
+    check("a duplicate of the same face is still skipped",
+          again.get("stored") is False)
+
+    check("the barcode link is stored",
+          any(r for r in [vault.photo_coverage("Kuon")] if r["total"] >= 3))
+
+    # Seeded art must not be counted as evidence about real cases.
+    # A title used nowhere else in this suite, so the only row is the seeded
+    # one — otherwise an earlier user photo would mask the distinction.
+    vault.add_photo(noise_b64(7100), "Rule of Rose", source="seed", face="front")
+    seeded = vault.photo_coverage("Rule of Rose")
+    check("seeded art is not mistaken for a user photo",
+          seeded["seeded"] and not seeded["have_user_photo"])
+    whole = vault.photo_coverage()
+    check("library-wide coverage separates the two sources",
+          whole["user_titles"] >= 1 and whole["seed_titles"] >= 1)
+
     # Desktop-only config must never be handed to a phone.
     check("local_vision_* is settable from the CLI",
           "local_vision_model" in keystore.SETTABLE)

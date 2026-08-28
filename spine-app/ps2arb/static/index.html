@@ -294,6 +294,7 @@ input::placeholder{color:var(--dim)}
 </div>
 
 <div id="teach"></div>
+<div id="libcap"></div>
 <div id="flips"></div>
 
 <details id="setup" class="setup">
@@ -862,8 +863,10 @@ async function startCoverScan(mode){
              width:{ideal:1920}, height:{ideal:1080}}});
     $('#video').srcObject = stream;
     await $('#video').play();
-    $('#scanCapture').textContent = mode === 'shelf' ? 'Capture shelf'
-                                                     : 'Capture cover';
+    $('#scanCapture').textContent =
+      mode === 'shelf'  ? 'Capture shelf'
+    : mode === 'library'? 'Capture ' + (libraryShot.face || 'cover')
+                        : 'Capture cover';
     const scan = $('#scan');
     scan.classList.remove('off');
     scan.classList.add('on', 'capturing');
@@ -889,7 +892,8 @@ function captureFrame(){
   const phash = mode === 'shelf' ? '' : coverHash(c);
   if(navigator.vibrate) navigator.vibrate(30);
   stopScan();                                   // free the camera before the call
-  if(mode === 'shelf') window.__identifyShelf(b64);
+  if(mode === 'library') window.__libraryStore(b64);
+  else if(mode === 'shelf') window.__identifyShelf(b64);
   else window.__identifyCover(b64, phash);
 }
 
@@ -1002,9 +1006,13 @@ async function resolveUpc(code){
             body: JSON.stringify({title: state.title, variant: state.variant})});
           $('#teach').innerHTML = '<div class="teach"><p>Saved.</p></div>';
           setTimeout(()=>{ $('#teach').innerHTML=''; }, 1500);
+          offerCoverPhotos(state.title, state.variant, d.upc);
         });
       } else {
+        // Already known and nothing to confirm — no teach panel, but the scan
+        // still resolved a title, so it is still a chance to photograph the case.
         $('#teach').innerHTML = '';
+        offerCoverPhotos(d.title, d.variant, d.upc);
       }
       value();
     }else{
@@ -1033,6 +1041,66 @@ async function resolveUpc(code){
   }catch(err){ note('Lookup failed: ' + err.message); }
 }
 
+/* ---- build the photo library from confirmed barcode scans ----
+
+   A barcode resolves a title with near-certainty, which makes a photo taken
+   right after one the best-labelled image this app can collect -- better than
+   anything a vision model guesses at. It is also the only kind of photo that
+   captures a REAL case: glare, angle, case plastic, shelf wear. The 337 seeded
+   covers are clean catalogue scans and tell us nothing about that.
+
+   Deliberately non-blocking: three optional shots, each dismissable, and the
+   whole panel disappears on the next scan whether or not it was used. Nothing
+   here should slow down working through a stack of games. Captures ride the
+   existing offline outbox, so they are never lost if the desktop is away. */
+let libraryShot = {title:'', variant:'unknown', barcode:'', face:'front'};
+
+window.__libraryStore = async function(b64){
+  const face = libraryShot.face;
+  const el = $('#libState');
+  if(el) el.textContent = 'Saving ' + face + '…';
+  try{
+    const r = await fetch('/api/identify/remember', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({image:b64, title:libraryShot.title,
+                            variant:libraryShot.variant,
+                            barcode:libraryShot.barcode, face})});
+    const d = await r.json();
+    const btn = $('#lib-' + face);
+    if(btn){ btn.textContent = '✓ ' + face; btn.classList.add('ghost'); }
+    if(el) el.textContent = d.queued
+      ? face + ' saved — ' + (d.pending || 0) + ' waiting to sync'
+      : face + ' saved.';
+  }catch(e){
+    if(el) el.textContent = 'Could not save the ' + face + ' photo.';
+  }
+};
+
+function offerCoverPhotos(title, variant, barcode){
+  libraryShot = {title, variant: variant || 'unknown',
+                 barcode: barcode || '', face:'front'};
+  const box = $('#libcap');
+  if(!box) return;
+  box.innerHTML =
+    `<div class="teach">
+       <p>Add photos of <b>${esc(title)}</b> to teach the scanner this exact
+          case. Optional — skip any of them.</p>
+       <button class="btn" id="lib-front">front</button>
+       <button class="btn" id="lib-spine">spine</button>
+       <button class="btn" id="lib-back">back</button>
+       <button class="btn ghost" id="lib-done">done</button>
+       <div id="libState" class="muted" style="margin-top:6px"></div>
+     </div>`;
+  ['front','spine','back'].forEach(f => {
+    const b = $('#lib-' + f);
+    if(b) b.addEventListener('click', ()=>{
+      libraryShot.face = f;
+      startCoverScan('library');
+    });
+  });
+  $('#lib-done').addEventListener('click', ()=>{ box.innerHTML = ''; });
+}
+
 function offerTeach(code, title){
   $('#teach').innerHTML =
     `<div class="teach">
@@ -1048,6 +1116,7 @@ function offerTeach(code, title){
     state.pendingUpc = null;
     $('#teach').innerHTML = '<div class="teach"><p>Saved.</p></div>';
     setTimeout(()=>{ $('#teach').innerHTML=''; }, 1600);
+    offerCoverPhotos(title, state.variant, code);
   });
 }
 
