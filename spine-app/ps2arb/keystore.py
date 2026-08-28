@@ -99,6 +99,56 @@ def _merge_outcomes(rows) -> dict:
             log.close()
     except Exception as exc:                            # noqa: BLE001
         return {"ok": False, "detail": str(exc)}
+def _local_vision(image_b64: str) -> dict:
+    """CLIP first; if it is not sure, let a desktop vision model choose from
+    CLIP's shortlist.
+
+    This runs on the DESKTOP for three reasons: the CLIP embeddings are here,
+    Ollama is here on loopback where it cannot be reached by anything else, and
+    the phone already talks to this server over the tailnet. Nothing new is
+    exposed and the phone needs no extra configuration.
+
+    Returns the same {"matched": ...} shape as /v1/vault/photo/match, plus
+    `via` saying which tier answered, so the caller can label it honestly
+    instead of passing a model's guess off as a library hit."""
+    hit = _vault.match_photo(image_b64)
+    if hit.get("matched"):
+        return {**hit, "via": "photo-index"}
+
+    store = _store()
+    url = store.get("local_vision_url")
+    model = store.get("local_vision_model")
+    cands = _vault.candidates(image_b64, k=5)
+    if not url or not model:
+        return {"matched": None, "via": None, "candidates": cands,
+                "detail": "no local vision model configured"}
+    if not cands:
+        # Without a shortlist this is just a slow open-ended guess, and a local
+        # small model is measurably poor at that (50%). Let the caller fall
+        # through to the cloud model instead of pretending.
+        return {"matched": None, "via": None, "candidates": [],
+                "detail": "no CLIP candidates (index empty or CLIP unavailable)"}
+    try:
+        import identify
+        res = identify.identify_cover(
+            image_b64, "image/jpeg", provider="openai",
+            api_key=store.get("vision_api_key") or "local", model=model,
+            base_url=url, candidates=cands,
+            # Local reasoning models otherwise burn the whole budget thinking
+            # and return empty content.
+            extra={"reasoning_effort": "none"})
+    except Exception as exc:                                # noqa: BLE001
+        return {"matched": None, "via": None, "candidates": cands,
+                "detail": f"local vision failed: {exc}"}
+    if not res.usable:
+        return {"matched": None, "via": None, "candidates": cands,
+                "detail": res.note or res.status}
+    return {"matched": {"title": res.title,
+                        "variant": res.variant or "unknown", "barcode": ""},
+            "via": "local-vision", "confidence": res.confidence,
+            "candidates": cands}
+
+
 VERSION = "1.0"
 
 # Tailscale address ranges. In "open" mode the keystore serves token-free but
@@ -119,6 +169,9 @@ def _is_trusted_client(ip_str: str) -> bool:
 # The keystore holds and serves only durable service credentials — never the
 # phone's keystore_url / keystore_token, which are how the phone reaches it.
 SERVED = _settings.KEYSTORE_SERVED_FIELDS
+# Settable from the CLI but never handed to a phone: desktop-local config such
+# as the loopback URL of the vision model. See settings.KEYSTORE_LOCAL_FIELDS.
+SETTABLE = SERVED | _settings.KEYSTORE_LOCAL_FIELDS
 
 
 def _store() -> _settings.Settings:
@@ -232,6 +285,10 @@ class Handler(BaseHTTPRequestHandler):
         # Photo index: match a query photo, or store a confirmed one.
         if self.path == "/v1/vault/photo/match":
             return self._send(200, _vault.match_photo(body.get("image") or ""))
+        # CLIP, then the desktop vision model on CLIP's shortlist. Separate
+        # route so an older phone build keeps the plain match semantics.
+        if self.path == "/v1/vault/photo/identify":
+            return self._send(200, _local_vision(body.get("image") or ""))
         if self.path == "/v1/vault/photo":
             return self._send(200, _vault.add_photo(
                 body.get("image") or "", body.get("title") or "",
@@ -333,7 +390,7 @@ def _cli(argv: list[str]) -> int:
 
     if cmd == "list":
         store = _store()
-        for f in sorted(SERVED):
+        for f in sorted(SETTABLE):
             m = store.masked().get(f, {})
             state = m.get("hint") if m.get("set") else "—"
             print(f"  {f:22} {state}")
@@ -344,8 +401,9 @@ def _cli(argv: list[str]) -> int:
             print("usage: keystore.py set <field> <value>")
             return 2
         field, value = rest[0], rest[1]
-        if field not in SERVED:
-            print(f"unknown field '{field}'. one of: {', '.join(sorted(SERVED))}")
+        if field not in SETTABLE:
+            print(f"unknown field '{field}'. one of: "
+                  f"{', '.join(sorted(SETTABLE))}")
             return 2
         _store().set(field, value)
         print(f"set {field}")

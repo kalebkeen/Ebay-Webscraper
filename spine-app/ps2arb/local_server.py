@@ -50,6 +50,12 @@ _STATIC = Path(__file__).parent / "static"
 # default, which made an unreachable desktop stall the whole identify.
 _PHOTO_MATCH_TIMEOUT = 3.5
 
+# The /identify route may actually run a vision model on the desktop, so it
+# needs more than an index lookup — but not so much that an asleep desktop
+# stalls the scan. A local 4B answers in about 1-3s; 9s covers a cold model
+# load without making a dead desktop expensive.
+_DESKTOP_VISION_TIMEOUT = 9.0
+
 # Once the desktop has failed to answer, stop asking for a while. Without this
 # every scan pays the timeout again, which is worst exactly when it hurts most:
 # working down a shelf with no signal, where the desktop is not coming back
@@ -629,20 +635,38 @@ class Handler(BaseHTTPRequestHandler):
                 # repeat cover, no vision-API call at all. Short timeout: an
                 # asleep desktop must not stall the paths below it, and after
                 # one failure we stop asking for a minute (see the backoff).
+                # /identify is the newer route: CLIP, then the desktop's own
+                # vision model choosing from CLIP's shortlist. It needs a
+                # longer budget than a pure index lookup because it may run a
+                # model. Older keystores 404 it, so fall back to the plain
+                # match rather than losing the index entirely.
                 vm = None
                 if not _vault_probably_down():
-                    vm = _vault_call("POST", "/v1/vault/photo/match",
+                    vm = _vault_call("POST", "/v1/vault/photo/identify",
                                      {"image": img},
-                                     timeout=_PHOTO_MATCH_TIMEOUT)
+                                     timeout=_DESKTOP_VISION_TIMEOUT)
+                    if vm is None:
+                        vm = _vault_call("POST", "/v1/vault/photo/match",
+                                         {"image": img},
+                                         timeout=_PHOTO_MATCH_TIMEOUT)
                     _note_vault_result(vm is not None)
                 if vm and vm.get("matched"):
                     hit = vm["matched"]
                     title = hit.get("title")
+                    # Label by which tier actually answered. An index hit is a
+                    # near-certainty; a model choosing off a shortlist is a
+                    # good guess, and saying so is what keeps the confirm step
+                    # meaningful.
+                    local = vm.get("via") == "local-vision"
                     return self._send(200, _priced({
                         "status": "matched", "title": title, "raw_title": title,
                         "variant": hit.get("variant") or "unknown",
-                        "confidence": "high", "source": "photo-index",
-                        "note": "recognized from your photo library"},
+                        "confidence": (vm.get("confidence") or "medium")
+                                      if local else "high",
+                        "source": "desktop-vision" if local else "photo-index",
+                        "note": ("identified on your desktop from similar "
+                                 "covers — check the spine before you pay")
+                                if local else "recognized from your photo library"},
                         title, hit.get("variant") or "unknown"))
 
                 # 2. The desktop did not answer (asleep, or no signal). Try the

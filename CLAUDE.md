@@ -55,6 +55,18 @@ anything that doesn't move toward real prices.
   valuation path.
 - Photo identify keeps the vision model internal (product choice) but keeps
   confidence/confirm visible.
+- **Identify is tiered, cheapest and surest first:** CLIP photo-index (free,
+  instant) → desktop vision model on CLIP's top-5 shortlist (free, ~1-3s) →
+  offline phone hash (no network) → cloud vision model (20/day/model). Each
+  tier must be able to abstain, and the UI labels which one answered so the
+  confirm step stays meaningful.
+- **The shortlist is why a small local model is usable.** Its errors were
+  naming, not recognition ("Black: PS2 Game", the Japanese title, a tagline);
+  given canonical strings to choose from, a local 4B went 50% -> 89% correct
+  with fewer wrong answers. Keep "none of these" available in that prompt.
+- **Ollama stays on 127.0.0.1.** It has no auth of its own; the keystore (which
+  gates by tailnet source IP) is the front door. `local_vision_*` is settable
+  but never served to a phone.
 - **The offline cover matcher abstains rather than guesses.** It runs when
   nothing else can, so nothing is left to catch it being wrong. `phash_index`
   refuses on distance (cutoff) and on ambiguity (a different title within

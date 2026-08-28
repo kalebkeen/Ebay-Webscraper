@@ -129,6 +129,57 @@ def main() -> int:
     else:
         print("(sentence-transformers/torch not installed — CLIP checks skipped)")
 
+    # --- CLIP shortlist + the desktop vision tier -------------------------
+    # candidates() answers a deliberately softer question than match_photo():
+    # "what might this be", with no threshold. It is what lets a local model
+    # pick from canonical strings instead of inventing one.
+    cands = vault.candidates(noise_b64(1), k=3)
+    if vault.clip_available():
+        check("candidates returns a ranked shortlist",
+              isinstance(cands, list) and len(cands) <= 3)
+        check("candidates are distinct titles",
+              len({c["title"] for c in cands}) == len(cands))
+        check("candidates carry a similarity score",
+              all("similarity" in c for c in cands) if cands else True)
+        check("candidates are ordered best-first",
+              all(cands[i]["similarity"] >= cands[i + 1]["similarity"]
+                  for i in range(len(cands) - 1)))
+    else:
+        # dHash cannot rank near-misses usefully, and a bad shortlist is worse
+        # than none — it would steer the model toward a confident wrong pick.
+        check("no CLIP -> no shortlist offered", cands == [])
+
+    # The keystore's /identify tier must degrade honestly: with no local model
+    # configured it reports no match rather than inventing one, and it must
+    # never pass a model's guess off as an index hit.
+    settings.Settings(Path(os.environ["SPINE_KEYSTORE_STORE"])).set(
+        "local_vision_url", "")
+    # A flat grey frame, not more noise: random-noise images sit close together
+    # in CLIP space and would match each other, which would test nothing.
+    from PIL import Image as _Im
+    _b = io.BytesIO()
+    _Im.new("RGB", (64, 64), (128, 128, 128)).save(_b, format="JPEG", quality=90)
+    blank = base64.b64encode(_b.getvalue()).decode()
+    check("the probe genuinely matches nothing in the index",
+          vault.match_photo(blank).get("matched") is None)
+    res = keystore._local_vision(blank)
+    check("no local model configured -> no match, no pretending",
+          res.get("matched") is None and res.get("via") is None)
+    check("a miss still explains itself", bool(res.get("detail")))
+
+    # A stored cover must still come back as an index hit, labelled as one.
+    vault.add_photo(noise_b64(4242), "Okami", "black_label")
+    hit = keystore._local_vision(noise_b64(4242))
+    check("an indexed cover is labelled photo-index, not local-vision",
+          hit.get("matched") and hit.get("via") == "photo-index")
+
+    # Desktop-only config must never be handed to a phone.
+    check("local_vision_* is settable from the CLI",
+          "local_vision_model" in keystore.SETTABLE)
+    check("local_vision_* is NOT served to the phone",
+          "local_vision_model" not in keystore.SERVED
+          and "local_vision_url" not in keystore.SERVED)
+
     failures = [n for n, ok in CHECKS if not ok]
     print("-" * 72)
     for n, ok in CHECKS:

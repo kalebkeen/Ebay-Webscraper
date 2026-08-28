@@ -480,6 +480,59 @@ def match_photo(image_b64: str, max_distance: int = _MATCH_DISTANCE,
     return {"matched": None, "best_distance": (best_d if best else None)}
 
 
+def candidates(image_b64: str, k: int = 5) -> list[dict]:
+    """The k most visually similar titles, WITHOUT applying the match
+    threshold.
+
+    match_photo() answers "is this definitely a cover I hold?" and stays silent
+    unless it is sure. This answers the softer question "what might it be?",
+    which is what a vision model needs: measured on 82 degraded shots the true
+    title was in this top-5 in 81 of them, so handing the list to the model
+    turns an open-ended naming problem into a multiple choice one. That took a
+    local 4B model from 50% to 89% correct, with fewer wrong answers, because
+    most of its errors were never misrecognition -- they were taglines,
+    punctuation and Japanese-vs-romanised spellings that no longer matter once
+    it is picking from canonical strings.
+
+    Distinct titles, best first. Empty when CLIP is unavailable: dHash is not
+    good enough to rank near-misses, and a bad shortlist is worse than none."""
+    if not _HAVE_PIL or not _HAVE_CLIP:
+        return []
+    try:
+        raw = base64.b64decode(image_b64)
+    except Exception:                                   # noqa: BLE001
+        return []
+    conn = _conn()
+    try:
+        rows = conn.execute("SELECT title, variant, embedding FROM photo_index "
+                            "WHERE embedding IS NOT NULL").fetchall()
+    finally:
+        conn.close()
+    if not rows:
+        return []
+    try:
+        import json as _json
+        import numpy as _np
+        q = _np.array(_embed(raw), dtype=_np.float32)
+        scored = []
+        for r in rows:
+            e = _np.asarray(_json.loads(r["embedding"]), dtype=_np.float32)
+            scored.append((float(q @ e), r["title"], r["variant"]))
+    except Exception:                                   # noqa: BLE001
+        return []
+    scored.sort(reverse=True)
+    out, seen = [], set()
+    for sim, title, variant in scored:
+        if title in seen:
+            continue                                    # one row per title
+        seen.add(title)
+        out.append({"title": title, "variant": variant or "unknown",
+                    "similarity": round(sim, 3)})
+        if len(out) >= k:
+            break
+    return out
+
+
 def stats() -> dict:
     conn = _conn()
     try:

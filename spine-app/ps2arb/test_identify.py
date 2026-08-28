@@ -250,6 +250,70 @@ def main() -> int:
     check("the time budget stops retrying before the attempt cap",
           0 < calls5["n"] < 50)
 
+    # 12. The CLIP shortlist. A local model's errors are overwhelmingly naming
+    # errors -- it reads the right cover and writes "Black: PS2 Game" or the
+    # Japanese title -- so being handed the canonical strings to choose from is
+    # what turns it from 50% to 89% correct. The prompt must therefore carry
+    # the candidates, and must still permit "none of these", or a shortlist
+    # would convert an unknown cover into a confident wrong pick.
+    seen = {}
+    def spy(status=200, payload=None):
+        def t(method, url, headers, body):
+            seen["body"] = json.loads(body.decode())
+            return status, (payload if payload is not None else {
+                "choices": [{"message": {"content": json.dumps(
+                    {"title": "Ico", "variant": "unknown",
+                     "confidence": "high"})}}]})
+        return t
+
+    r = identify.identify_cover(
+        "Zm9v", provider="gemini", api_key=KEY, transport=spy(),
+        candidates=[{"title": "Ico"}, {"title": "Okami"}])
+    sent = seen["body"]["messages"][0]["content"][0]["text"]
+    check("shortlist prompt lists the candidates",
+          "- Ico" in sent and "- Okami" in sent)
+    check("shortlist prompt still allows 'none of these'",
+          "none of them" in sent.lower())
+    check("shortlist prompt warns against guessing a lookalike",
+          "do not guess" in sent.lower())
+    check("shortlist result still resolves through the catalog",
+          r.status == "matched" and r.title == "Ico")
+
+    identify.identify_cover("Zm9v", provider="gemini", api_key=KEY,
+                            transport=spy(), candidates=None)
+    plain = seen["body"]["messages"][0]["content"][0]["text"]
+    check("no candidates -> the plain open-ended prompt", "- " not in plain)
+    identify.identify_cover("Zm9v", provider="gemini", api_key=KEY,
+                            transport=spy(), candidates=[])
+    check("empty candidate list -> plain prompt too",
+          seen["body"]["messages"][0]["content"][0]["text"] == plain)
+    identify.identify_cover("Zm9v", provider="gemini", api_key=KEY,
+                            transport=spy(), candidates=["Ico", "Okami"])
+    check("plain strings work as candidates, not just dicts",
+          "- Ico" in seen["body"]["messages"][0]["content"][0]["text"])
+
+    # `extra` exists for reasoning models: qwen3.5 spends its whole budget in a
+    # `reasoning` field and returns empty content unless told not to think.
+    identify.identify_cover("Zm9v", provider="gemini", api_key=KEY,
+                            transport=spy(), extra={"reasoning_effort": "none"})
+    check("extra fields reach the request body",
+          seen["body"].get("reasoning_effort") == "none")
+    identify.identify_cover("Zm9v", provider="gemini", api_key=KEY,
+                            transport=spy())
+    check("no extra -> body stays clean",
+          "reasoning_effort" not in seen["body"])
+
+    # And if a reasoning model DOES strand the answer in `reasoning`, salvage
+    # it rather than reporting an empty response.
+    r = identify.identify_cover(
+        "Zm9v", provider="gemini", api_key=KEY,
+        transport=spy(payload={"choices": [{"message": {
+            "content": "",
+            "reasoning": 'I can read the cover. {"title": "Okami", '
+                         '"variant": "unknown", "confidence": "medium"}'}}]}))
+    check("answer stranded in `reasoning` is recovered",
+          r.status == "matched" and r.title == "Okami")
+
     failures = [n for n, ok in CHECKS if not ok]
     print("-" * 72)
     for n, ok in CHECKS:

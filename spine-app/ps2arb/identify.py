@@ -54,6 +54,29 @@ _PROMPT_SINGLE = (
     'game title), "variant", "confidence". ' + _VARIANT_NOTE +
     " If the image is not a PS2 game, set title to null."
 )
+# The shortlist prompt. Used when the CLIP index can offer visually similar
+# covers but was not confident enough to answer alone.
+#
+# Why this exists: a model reading a cover cold has to invent the exact
+# canonical string, and that is where a small local model actually fails --
+# measured errors were "Aqua Aqua: The Addictive, Fast-Action 3D Puzzler!" for
+# "Aqua Aqua", "BLACK: PS2 Game" for "Black", the Japanese title instead of the
+# romanised one. It saw the right cover every time. Given the canonical strings
+# to choose from, a local 4B went from 50% to 89% correct on the same images.
+#
+# It must stay possible to answer "none of these", or the shortlist would turn
+# an unknown cover into a confident wrong pick -- which is the one outcome this
+# pipeline must never produce.
+_PROMPT_SHORTLIST = (
+    "You are identifying a PlayStation 2 (PS2) game from a photo of its cover "
+    "or spine. These titles from the reference library look visually similar, "
+    "most similar first:\n{candidates}\n"
+    "If the photo shows one of them, reply with that title copied EXACTLY as "
+    "written above. If it is clearly none of them, reply with the title as "
+    "printed on the cover instead. Do not guess a listed title merely because "
+    "it is similar. Respond with ONLY a JSON object and no other text with "
+    'keys "title", "variant", "confidence". ' + _VARIANT_NOTE
+)
 _PROMPT_MULTI = (
     "You are identifying PlayStation 2 (PS2) games from a photo that shows one "
     "or more game spines or covers (e.g. a shelf or a stack). Respond with "
@@ -241,17 +264,27 @@ def _call_anthropic(image_b64, media_type, prompt, api_key, model, transport):
     return text, None
 
 
-def _call_openai(image_b64, media_type, prompt, api_key, model, base_url, transport):
+def _call_openai(image_b64, media_type, prompt, api_key, model, base_url, transport,
+                 extra=None):
     """OpenAI-compatible chat/completions (Gemini free tier, Ollama, etc.).
-    Returns (model_text, error_note)."""
+    Returns (model_text, error_note).
+
+    `extra` merges endpoint-specific fields into the request body. It exists
+    for reasoning models: a local qwen3.5 spends its whole token budget in a
+    `reasoning` field and returns EMPTY content, which looks exactly like a
+    broken model. Sending reasoning_effort="none" fixed that and cut the call
+    from 10s to 0.8s. It is per-endpoint rather than global because other
+    providers reject unknown fields."""
     url = base_url.rstrip("/") + "/chat/completions"
-    body = json.dumps({
+    payload = {
         "model": model, "max_tokens": 2048,
         "messages": [{"role": "user", "content": [
             {"type": "text", "text": prompt},
             {"type": "image_url", "image_url": {
                 "url": f"data:{media_type};base64,{image_b64}"}}]}],
-    }).encode()
+    }
+    payload.update(extra or {})
+    body = json.dumps(payload).encode()
     headers = {"Authorization": "Bearer " + api_key,
                "content-type": "application/json"}
     status, payload = transport("POST", url, headers, body)
@@ -260,16 +293,24 @@ def _call_openai(image_b64, media_type, prompt, api_key, model, base_url, transp
     choices = payload.get("choices") or []
     if not choices:
         return None, "identify service returned no content"
-    content = (choices[0].get("message") or {}).get("content", "")
+    message = choices[0].get("message") or {}
+    content = message.get("content", "")
     # Some hosts return content as a list of parts; join text parts.
     if isinstance(content, list):
         content = "".join(p.get("text", "") for p in content
                           if isinstance(p, dict))
+    # A reasoning model that ran out of budget mid-thought leaves content empty
+    # and the answer stranded in `reasoning`. Salvage it rather than reporting
+    # "no content" -- the model did the work, it just never got to the JSON.
+    if not str(content).strip():
+        thought = message.get("reasoning") or message.get("thinking") or ""
+        if str(thought).strip():
+            return str(thought), None
     return content, None
 
 
 def _model_text(image_b64, media_type, prompt, *, provider, api_key, model,
-                base_url, transport):
+                base_url, transport, extra=None):
     """Resolve provider/key/model, call the vision model, return (text, err)."""
     provider = (provider or os.environ.get("VISION_PROVIDER")
                 or "anthropic").lower()
@@ -290,7 +331,7 @@ def _model_text(image_b64, media_type, prompt, *, provider, api_key, model,
         if not base:
             return None, "no vision base URL configured"
         return _call_openai(image_b64, media_type, prompt, api_key, model,
-                            base, transport)
+                            base, transport, extra)
     except urllib.error.URLError as exc:
         return None, f"unreachable: {exc.reason}"
     except Exception as exc:                            # noqa: BLE001
@@ -320,14 +361,26 @@ def _resolve_title(raw, variant, confidence) -> IdentifyResult:
 def identify_cover(image_b64: str, media_type: str = "image/jpeg", *,
                    provider: str | None = None, api_key: str | None = None,
                    model: str | None = None, base_url: str | None = None,
-                   transport: Callable = _http) -> IdentifyResult:
+                   transport: Callable = _http,
+                   candidates: list | None = None,
+                   extra: dict | None = None) -> IdentifyResult:
     """Identify one game from one photo. Never raises — failures become a status.
 
     provider: "anthropic" (default) or "gemini" / "openai" (OpenAI-compatible).
+    candidates: visually similar titles from the CLIP index. When supplied the
+        model is asked to CHOOSE from them (while still allowed to say none),
+        which is far easier than producing the canonical string unaided.
+    extra: endpoint-specific request fields (see _call_openai).
     """
-    text, err = _model_text(image_b64, media_type, _PROMPT_SINGLE,
+    names = [c.get("title") if isinstance(c, dict) else str(c)
+             for c in (candidates or [])]
+    names = [n for n in names if n]
+    prompt = (_PROMPT_SHORTLIST.format(
+                  candidates="\n".join(f"- {n}" for n in names))
+              if names else _PROMPT_SINGLE)
+    text, err = _model_text(image_b64, media_type, prompt,
                             provider=provider, api_key=api_key, model=model,
-                            base_url=base_url, transport=transport)
+                            base_url=base_url, transport=transport, extra=extra)
     if err:
         return IdentifyResult(status="error", note=err)
     data = _extract_json(text or "")
