@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from datetime import date
 
 import catalog
@@ -139,6 +140,13 @@ def _select(args) -> list:
 
 
 def main() -> int:
+    # PS2 titles carry macrons/kana; force UTF-8 so print() of a Japanese title
+    # doesn't crash a long run on Windows' cp1252 default.
+    for _s in (sys.stdout, sys.stderr):
+        try:
+            _s.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                                   # noqa: BLE001
+            pass
     ap = argparse.ArgumentParser(description="Precompute resale estimates into "
                                              "the price cache.")
     ap.add_argument("--db", default=None, help=f"cache path (default {DB_PATH})")

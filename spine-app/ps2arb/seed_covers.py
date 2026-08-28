@@ -58,6 +58,7 @@ import html.parser
 import json
 import os
 import re
+import sys
 import time
 import unicodedata
 import urllib.error
@@ -729,7 +730,20 @@ def _covered_titles() -> set:
         return set()
 
 
+def _force_utf8_output() -> None:
+    """PS2 titles are full of macrons/kana; Windows' default cp1252 stdout
+    raises UnicodeEncodeError when print() hits one (especially redirected to a
+    file), which would abort a long campaign mid-run. Force UTF-8, replacing
+    anything unencodable rather than crashing."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:                                   # noqa: BLE001
+            pass
+
+
 def main() -> int:
+    _force_utf8_output()
     ap = argparse.ArgumentParser(description="Seed the photo index with cover art.")
     ap.add_argument("--title", action="append", help="a title to seed (repeatable)")
     ap.add_argument("--titles-file", help="file of titles, one per line")
