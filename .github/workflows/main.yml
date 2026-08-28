@@ -70,13 +70,26 @@ jobs:
           ./sync_android.sh
 
       # Catches a broken pipeline here rather than after you have installed it.
+      #
+      # Globbed, not listed. The explicit list had drifted to four of sixteen
+      # suites, so most of the pipeline was shipping untested -- including the
+      # ones guarding the phone/desktop contracts (the offline cover hash, the
+      # photo outbox, the vault sync). Every suite runs without Pillow / torch
+      # / numpy, self-skipping when a desktop-only dependency is absent, so a
+      # bare runner is enough. Collect failures instead of stopping at the
+      # first, so one broken suite does not hide the rest.
       - name: Run the test suites
         working-directory: ${{ steps.find.outputs.dir }}
         run: |
-          for f in test_corpus.py test_adversarial.py test_comps.py test_economics.py; do
+          failed=""
+          for f in test_*.py; do
             echo "--- $f"
-            python3 "$f"
+            python3 "$f" || failed="$failed $f"
           done
+          if [ -n "$failed" ]; then
+            echo "FAILED SUITES:$failed"
+            exit 1
+          fi
 
       # `gradle-version` is load-bearing: without it this action only sets
       # up caching for a wrapper that is expected to already exist, and
